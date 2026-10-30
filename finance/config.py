@@ -41,3 +41,7 @@ INSTITUTION_FAMILY = {
     "ins_127989": "bofa",  # Bank of America
     "ins_115610": "bofa",  # Merrill (Merrill Edge, CMA-Edge)
 }
+
+# How long an institution's data-sharing consent lasts when Plaid doesn't report an expiry. Bank of America asks
+# customers to re-authorize yearly; the app estimates expiry from when it first saw the Item.
+CONSENT_MONTHS = {"ins_127989": 12}
