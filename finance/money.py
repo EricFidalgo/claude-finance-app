@@ -247,7 +247,7 @@ def bill_dates(bill, start, end):
     return out
 
 
-def _cents(dollars):
+def to_cents(dollars):
     return round(dollars * 100)
 
 
@@ -257,7 +257,7 @@ def _name_key(s):
 
 def bill_paid(bill, due, txns, window_days=7):
     """A matching outflow (name, amount within 10% unless variable) within `window_days` before the due date."""
-    key, amount = _name_key(bill["name"]), _cents(bill["amount"])
+    key, amount = _name_key(bill["name"]), to_cents(bill["amount"])
     lo = _iso(due - timedelta(days=window_days))
     for x in txns:
         if not (lo <= x["date"] <= _iso(due)) or x["amount_cents"] <= 0:
@@ -277,16 +277,16 @@ def safe_to_spend(accounts, plan, txns, today):
     due = sorted(((d, b) for b in plan["bills"] for d in bill_dates(b, today, payday)
                   if not bill_paid(b, d, txns)), key=lambda db: db[0])
     checking = checking_cents(accounts)
-    bills = sum(_cents(b["amount"]) for _, b in due)
+    bills = sum(to_cents(b["amount"]) for _, b in due)
     cards = cards_owed_cents(accounts)
-    buffer = _cents(plan.get("buffer") or 0)
+    buffer = to_cents(plan.get("buffer") or 0)
     available = checking - bills - cards - buffer
     days = (payday - today).days
     return {
         "status": "ok",
         "payday": _iso(payday),
         "days": days,
-        "bills": [{"name": b["name"], "due": _iso(d), "amount_cents": _cents(b["amount"])} for d, b in due],
+        "bills": [{"name": b["name"], "due": _iso(d), "amount_cents": to_cents(b["amount"])} for d, b in due],
         "available_cents": available,
         "per_day_cents": round(available / days),
         "lines": [{"label": "Checking (available)", "amount_cents": checking},
@@ -398,7 +398,7 @@ def _flag(kind, x, detail, previous=None):
             "previous_cents": previous, "detail": detail}
 
 
-def _dollars(c):
+def dollars(c):
     return f"${c / 100:,.2f}"
 
 
@@ -425,10 +425,10 @@ def unusual_charges(txns, today, days=14):
         if due:
             s = min(due, key=lambda s: abs(s["amount_cents"] - x["amount_cents"]))
             if s["fixed"] and abs(x["amount_cents"] - s["amount_cents"]) >= s["amount_cents"] / 100:
-                found.append(_flag("price_change", x, f"Was {_dollars(s['amount_cents'])}, now "
-                                                      f"{_dollars(x['amount_cents'])}", s["amount_cents"]))
+                found.append(_flag("price_change", x, f"Was {dollars(s['amount_cents'])}, now "
+                                                      f"{dollars(x['amount_cents'])}", s["amount_cents"]))
             elif not s["fixed"] and x["amount_cents"] > 1.5 * s["median_cents"]:
-                found.append(_flag("higher_than_usual", x, f"Usually about {_dollars(s['median_cents'])}",
+                found.append(_flag("higher_than_usual", x, f"Usually about {dollars(s['median_cents'])}",
                                    s["median_cents"]))
         elif len(prior) <= 1 and x["amount_cents"] >= 10000 and x["amount_cents"] >= 3 * typical:
             found.append(_flag("large", x, "Large charge at a merchant you rarely use"))
@@ -442,7 +442,7 @@ def _matches(bill, series):
         return False
     if not bill.get("fixed", True) or not series["fixed"]:
         return True
-    return abs(series["amount_cents"] - _cents(bill["amount"])) <= _cents(bill["amount"]) / 10
+    return abs(series["amount_cents"] - to_cents(bill["amount"])) <= to_cents(bill["amount"]) / 10
 
 
 def upcoming_bills(accounts, plan, recurring, txns, today, days=35):
@@ -458,7 +458,7 @@ def upcoming_bills(accounts, plan, recurring, txns, today, days=35):
     rows = []
     for b in plan.get("bills") or []:
         for d in bill_dates(b, today, end):
-            rows.append({"name": b["name"], "due": _iso(d), "amount_cents": _cents(b["amount"]), "source": "plan",
+            rows.append({"name": b["name"], "due": _iso(d), "amount_cents": to_cents(b["amount"]), "source": "plan",
                          "fixed": b.get("fixed", True), "autopay": b.get("autopay"), "category": b.get("category"),
                          "account_key": by_mask.get(b.get("account"), default) if b.get("account") else default,
                          "paid": bill_paid(b, d, txns)})
@@ -482,7 +482,7 @@ def upcoming_bills(accounts, plan, recurring, txns, today, days=35):
         while d < end:
             paydays.append(d)
             d = next_payday(plan["income"], d)
-    pay = _cents(plan["income"]["amount"]) if plan.get("income") else 0
+    pay = to_cents(plan["income"]["amount"]) if plan.get("income") else 0
 
     rows.sort(key=lambda r: (r["due"], r["name"]))
     balance, pending_paydays = checking_cents(accounts), list(paydays)
@@ -515,7 +515,7 @@ def left_to_invest(accounts, holdings, plan, upcoming, typical_monthly_cents):
     checking = {x["account_key"] for x in accounts if is_checking(x)}
     bills = sum(b["amount_cents"] for b in upcoming["bills"] if b.get("account_key") in checking and not b["paid"])
     cards = cards_owed_cents(accounts)
-    buffer = _cents(plan.get("buffer") or 0)
+    buffer = to_cents(plan.get("buffer") or 0)
     checking_left = max(0, checking_cents(accounts) - cards - bills - buffer)
     idle = sum(x.get("value_cents") or 0 for x in holdings if bucket_of(x) == "cash")
     total = idle + checking_left
@@ -585,9 +585,9 @@ def alerts(items, upcoming, unusual, now):
     for b in upcoming["bills"]:
         if b.get("covered") is False:
             found.append(_alert("urgent", "uncovered_bill", f"Checking may not cover {b['name']}",
-                                f"{_dollars(b['amount_cents'])} due {b['due']}."))
+                                f"{dollars(b['amount_cents'])} due {b['due']}."))
     for u in unusual:
-        found.append(_alert("warn", "unusual_charge", f"{u['merchant']} {_dollars(u['amount_cents'])} on {u['date']}",
+        found.append(_alert("warn", "unusual_charge", f"{u['merchant']} {dollars(u['amount_cents'])} on {u['date']}",
                             u["detail"]))
     stale_after = timedelta(hours=config.STALE_AFTER_HOURS)
     for it in items:

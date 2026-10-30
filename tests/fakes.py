@@ -73,7 +73,7 @@ class FakePlaid:
         if path == "/accounts/get":
             return {"accounts": self.accounts}
         if path == "/transactions/sync":
-            return self.pages[body["cursor"]]
+            return self.pages.get(body["cursor"]) or page(next_cursor=body["cursor"])  # caught up: nothing new
         if path == "/investments/holdings/get":
             return {"accounts": self.accounts, "holdings": self.holdings, "securities": self.securities}
         raise AssertionError(f"unexpected Plaid call {path}")
@@ -91,3 +91,13 @@ def security(security_id, ticker, type_, name=None, cash_equivalent=False, price
 def holding(account_id, security_id, quantity, value, cost_basis=None):
     return {"account_id": account_id, "security_id": security_id, "quantity": quantity,
             "institution_value": value, "cost_basis": cost_basis}
+
+
+class FakeBank:
+    """Plaid as a whole: routes each call to the FakePlaid that owns the request's access token."""
+
+    def __init__(self, **fakes_by_token):
+        self.fakes = fakes_by_token
+
+    def post(self, path, body):
+        return self.fakes[body["access_token"]].post(path, body)
