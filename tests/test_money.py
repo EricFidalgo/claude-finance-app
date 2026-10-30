@@ -209,6 +209,25 @@ def test_detect_recurring_finds_fixed_and_variable_monthly_series_and_skips_one_
     assert found[("Car Lender", 42000)]["next_due"] == "2026-11-15"
 
 
+def test_detect_recurring_ignores_chance_matches_among_everyday_charges():
+    # Pizza: many charges at random amounts; two happen to be within 5% and a week apart.
+    pizza = [t(c, d, merchant="Pizza Place") for c, d in [(1200, "2026-10-15"), (1230, "2026-10-22"), (2890, "2026-10-03"),
+                                                          (740, "2026-10-11"), (3310, "2026-10-19"), (1960, "2026-10-24")]]
+    pharmacy = [t(2400, "2026-09-12", "MEDICAL", "CVS"), t(5100, "2026-10-13", "MEDICAL", "CVS")]  # two visits a month apart
+    # Power bills vary; two of four land within 5% of each other. One varying series, due after the latest bill.
+    power = monthly([7820, 6407, 6390, 7190], "City Power", "RENT_AND_UTILITIES", start=(2026, 7, 18))
+    found = money.detect_recurring(pizza + pharmacy + power, date(2026, 10, 29))
+
+    assert [(r["merchant"], r["fixed"], r["next_due"]) for r in found] == [("City Power", False, "2026-11-18")]
+
+
+def test_detect_recurring_follows_a_subscription_through_a_price_rise():
+    txns = monthly([1599, 1599, 1599, 1799], "Streamly")  # Oct 12 charge is the new price
+    [s] = money.detect_recurring(txns, date(2026, 10, 29))
+    assert (s["amount_cents"], s["count"], s["last_date"], s["next_due"], s["fixed"]) == \
+        (1799, 4, "2026-10-12", "2026-11-12", True)
+
+
 def test_detect_recurring_accepts_a_single_charge_the_bank_marks_recurring():
     txns = [t(499, "2026-10-05", "ENTERTAINMENT", "Apple.com/bill", name="APPLE.COM/BILL RECURRING 866-712-7753")]
     [r] = money.detect_recurring(txns, date(2026, 10, 29))
@@ -243,6 +262,16 @@ def test_unusual_charges_flags_duplicates_large_one_offs_and_recurring_price_jum
     assert flagged[("price_change", "Streamly")]["previous_cents"] == 1599
     assert flagged[("higher_than_usual", "City Power")]["previous_cents"] == 11800
     assert all(u["detail"] for u in flagged.values())
+
+
+def test_unusual_charges_take_the_plans_word_that_a_bill_varies():
+    power = monthly([6407, 6400, 6390, 7190], "City Power", "RENT_AND_UTILITIES", start=(2026, 7, 18))
+    assert [u["kind"] for u in money.unusual_charges(power, date(2026, 10, 20))] == ["price_change"]
+
+    varies = [{"name": "City Power", "amount": 70, "due_day": 18, "fixed": False}]
+    assert money.unusual_charges(power, date(2026, 10, 20), varies) == []
+    spike = power[:3] + [t(9900, "2026-10-18", "RENT_AND_UTILITIES", "City Power")]  # 1.5x the usual still shows
+    assert [u["kind"] for u in money.unusual_charges(spike, date(2026, 10, 20), varies)] == ["higher_than_usual"]
 
 
 # --- upcoming bills
@@ -348,6 +377,8 @@ def test_alerts_rank_login_and_uncovered_bills_above_unusual_charges_and_stale_s
         ("urgent", "login_required"), ("urgent", "uncovered_bill"), ("warn", "unusual_charge"), ("warn", "stale_sync")]
     assert "Bank of America" in found[0]["title"] and "./run.sh link" in found[0]["detail"]
     assert "Merrill" in found[3]["title"]
+    assert found[1]["detail"] == "$1,500.00 due Sun, Nov 1."  # dates read as words: these show on the phone as-is
+    assert found[2]["title"] == "Diner $42.50 on Mon, Oct 26"
 
 
 def test_alerts_warn_when_consent_has_thirty_days_or_fewer():

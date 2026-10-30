@@ -352,6 +352,8 @@ def detect_recurring(txns, today):
 
     Within a merchant, charges within 5% of each other form one fixed series, so several subscriptions billed under
     one name (Apple.com/bill) stay separate. A lone charge the bank labels RECURRING counts as monthly.
+    Two charges make a series only when they are all the merchant has: among a restaurant's many charges, two
+    similar amounts a week apart are chance. A variable series needs three.
     """
     by_merchant = defaultdict(list)
     for x in sorted(txns, key=lambda x: x["date"]):
@@ -368,13 +370,23 @@ def detect_recurring(txns, today):
                     break
             else:
                 clusters.append([x])
-        fixed = []
+        series = []
         for c in clusters:
-            cadence = len(c) >= 2 and _cadence([date.fromisoformat(x["date"]) for x in c])
-            if cadence:
-                fixed.append(_series(c, cadence, True))
+            enough = len(c) >= 3 or (len(c) == 2 and len(rows) == 2)
+            if enough and (cadence := _cadence([date.fromisoformat(x["date"]) for x in c])):
+                series.append((c, cadence))
+        taken = {x["transaction_id"] for c, _ in series for x in c}
+        fixed = []
+        for c, cadence in series:
+            # A charge on the next due date at a new price is the same bill after a price change.
+            for x in rows:
+                if x["transaction_id"] not in taken and x["date"] > c[-1]["date"] and \
+                        _days_apart(_iso(next_after(date.fromisoformat(c[-1]["date"]), cadence)), x["date"]) <= 5:
+                    c = [*c, x]
+                    taken.add(x["transaction_id"])
+            fixed.append(_series(c, cadence, True))
         found += fixed
-        if not fixed and len(rows) >= 2 and (cadence := _cadence([date.fromisoformat(x["date"]) for x in rows])):
+        if not fixed and len(rows) >= 3 and (cadence := _cadence([date.fromisoformat(x["date"]) for x in rows])):
             found.append(_series(rows, cadence, False))
             continue
         for c in clusters:
@@ -402,8 +414,12 @@ def dollars(c):
     return f"${c / 100:,.2f}"
 
 
-def unusual_charges(txns, today, days=14):
-    """Charges in the last `days` worth a look: possible duplicates, recurring charges that went up, big one-offs."""
+def unusual_charges(txns, today, plan_bills=(), days=14):
+    """Charges in the last `days` worth a look: possible duplicates, recurring charges that went up, big one-offs.
+
+    A plan bill marked fixed: false is never a price change, only higher than usual.
+    """
+    varies = {_name_key(b["name"]).strip(".,*#") for b in plan_bills if b.get("fixed") is False}
     outflows = sorted((x for x in txns if x["amount_cents"] > 0 and is_spending(x)),
                       key=lambda x: (x["date"], x["transaction_id"]))
     typical = _median([x["amount_cents"] for x in outflows]) if outflows else 0
@@ -424,10 +440,10 @@ def unusual_charges(txns, today, days=14):
                if _days_apart(s["next_due"], x["date"]) <= 5]
         if due:
             s = min(due, key=lambda s: abs(s["amount_cents"] - x["amount_cents"]))
-            if s["fixed"] and abs(x["amount_cents"] - s["amount_cents"]) >= s["amount_cents"] / 100:
+            if s["fixed"] and key not in varies and abs(x["amount_cents"] - s["amount_cents"]) >= s["amount_cents"] / 100:
                 found.append(_flag("price_change", x, f"Was {dollars(s['amount_cents'])}, now "
                                                       f"{dollars(x['amount_cents'])}", s["amount_cents"]))
-            elif not s["fixed"] and x["amount_cents"] > 1.5 * s["median_cents"]:
+            elif (not s["fixed"] or key in varies) and x["amount_cents"] > 1.5 * s["median_cents"]:
                 found.append(_flag("higher_than_usual", x, f"Usually about {dollars(s['median_cents'])}",
                                    s["median_cents"]))
         elif len(prior) <= 1 and x["amount_cents"] >= 10000 and x["amount_cents"] >= 3 * typical:
@@ -558,6 +574,11 @@ def consent(item, now):
     return {"expires": _iso(expires), "days_left": (expires - today).days, "estimated": estimated}
 
 
+def _day(iso):
+    d = date.fromisoformat(iso[:10])
+    return f"{d:%a, %b} {d.day}"
+
+
 def _alert(level, kind, title, detail):
     return {"level": level, "kind": kind, "title": title, "detail": detail}
 
@@ -580,14 +601,14 @@ def alerts(items, upcoming, unusual, now):
         if c and c["days_left"] <= 30:
             found.append(_alert("urgent" if c["days_left"] <= 7 else "warn", "consent_expiring",
                                 f"{name} access ends in {c['days_left']} days",
-                                f"{'About ' if c['estimated'] else ''}{c['expires']}. Re-link with ./run.sh link "
+                                f"{'About ' if c['estimated'] else ''}{_day(c['expires'])}. Re-link with ./run.sh link "
                                 "before then to keep data flowing."))
     for b in upcoming["bills"]:
         if b.get("covered") is False:
             found.append(_alert("urgent", "uncovered_bill", f"Checking may not cover {b['name']}",
-                                f"{dollars(b['amount_cents'])} due {b['due']}."))
+                                f"{dollars(b['amount_cents'])} due {_day(b['due'])}."))
     for u in unusual:
-        found.append(_alert("warn", "unusual_charge", f"{u['merchant']} {dollars(u['amount_cents'])} on {u['date']}",
+        found.append(_alert("warn", "unusual_charge", f"{u['merchant']} {dollars(u['amount_cents'])} on {_day(u['date'])}",
                             u["detail"]))
     stale_after = timedelta(hours=config.STALE_AFTER_HOURS)
     for it in items:

@@ -17,7 +17,7 @@ def gather(conn, plan, now):
     holdings = store.holdings(conn)
     recurring = money.detect_recurring(txns, today)
     upcoming = money.upcoming_bills(accounts, plan, recurring, txns, today)
-    unusual = money.unusual_charges(txns, today)
+    unusual = money.unusual_charges(txns, today, plan.get("bills") or [])
     return {
         "now": now.astimezone(),
         "today": today,
