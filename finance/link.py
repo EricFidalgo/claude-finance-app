@@ -4,12 +4,15 @@ Run with `./run.sh link` (inside the container: `python -m finance.link [--sandb
 http://localhost:8765 on the computer. Plaid Link in Production accepts plain http only on localhost.
 Linked Items are saved to data/items.json (mode 600). The page only ever receives link tokens, never access tokens.
 """
+import contextlib
 import json
 import sys
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from . import db
 from .plaid import READ_ONLY_PRODUCTS, PlaidClient, PlaidError, load_items, save_item
+from .sync import record_relink
 
 PORT = 8765
 APP_SYNC = "http://127.0.0.1:8787/api/sync"
@@ -62,7 +65,7 @@ async function openLink(req) {
   Plaid.create({
     token: t.link_token,
     onSuccess: async (public_token, meta) => {
-      const r = req.item_id ? await api('/api/updated', {})
+      const r = req.item_id ? await api('/api/updated', {item_id: req.item_id})
         : await api('/api/exchange', {public_token, institution: meta.institution && meta.institution.name});
       out.textContent = r.ok ? (r.message || 'Done.') : 'Failed: ' + (r.error || 'unknown error');
       showItems();
@@ -128,6 +131,8 @@ def make_handler(client):
                     return self._send(200, {"ok": True, "message": f"Linked {body.get('institution') or 'account'}. "
                                                                    f"{_sync_app()}"})
                 if self.path == "/api/updated":
+                    with contextlib.closing(db.connect()) as conn:
+                        record_relink(conn, body.get("item_id"))
                     return self._send(200, {"ok": True, "message": f"Updated. {_sync_app()}"})
             except PlaidError as e:  # code and Plaid's message only; never the request
                 return self._send(400, {"error": f"{e.code}: {e.message}"})
@@ -141,7 +146,9 @@ def make_handler(client):
             if body.get("item_id"):
                 # Update mode: repairs a login (ITEM_LOGIN_REQUIRED, consent renewal) and lets the owner
                 # change which accounts the Item shares.
-                item = next(i for i in load_items() if i["item_id"] == body["item_id"])
+                item = next((i for i in load_items() if i["item_id"] == body["item_id"]), None)
+                if item is None:
+                    raise LookupError(body["item_id"])
                 req["access_token"] = item["access_token"]
                 req["update"] = {"account_selection_enabled": True}
             else:

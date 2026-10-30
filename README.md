@@ -27,7 +27,7 @@ The app syncs every 6 hours on its own. Pull the latest from the Today screen, o
 
 ## Re-linking
 
-Bank of America's consent for Plaid lasts about 12 months. The Money screen shows the date under Connections, and Today warns you as it gets close or if a login breaks. To renew, run `./run.sh link` and open http://localhost:8765 in a browser **on this computer** (Plaid only allows plain-http links on localhost). Choose the bank's "Update" button; your history is kept.
+Bank of America's consent for Plaid lasts about 12 months. The Money screen shows the date under Connections, and Today warns you as it gets close or if a login breaks. To renew, run `./run.sh link` and open http://localhost:8765 in a browser **on this computer** (Plaid only allows plain-http links on localhost). Choose the bank's "Fix login or change accounts" button; your history is kept and the countdown restarts.
 
 ## Your data
 

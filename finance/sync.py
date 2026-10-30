@@ -4,17 +4,10 @@ sync_item(conn, client, item) is the whole job: Item status, balances, transacti
 /transactions/sync) and holdings. Plaid errors land on the Item's status row; they never raise.
 """
 import json
-from decimal import Decimal
 
 from . import config, db
+from .money import to_cents
 from .plaid import PlaidError, now_iso
-
-
-def cents(amount):
-    """Plaid dollars (float or None) to integer cents, without float rounding drift."""
-    if amount is None:
-        return None
-    return int((Decimal(str(amount)) * 100).quantize(Decimal(1)))
 
 
 def account_key(institution_id, account):
@@ -105,6 +98,12 @@ def _ensure_item(conn, item_id, institution):
                  (item_id, institution, now_iso()))
 
 
+def record_relink(conn, item_id):
+    """The owner renewed an Item's login or consent in Plaid Link; an estimated consent year restarts now."""
+    if not conn.execute("UPDATE items SET consent_since = ? WHERE item_id = ?", (now_iso(), item_id)).rowcount:
+        raise LookupError(item_id)
+
+
 def _update_item(conn, item_id, info):
     conn.execute("UPDATE items SET institution_id = ?, products = ?, consent_expires_at = ? WHERE item_id = ?",
                  (info.get("institution_id"), json.dumps(info.get("products") or []),
@@ -132,8 +131,8 @@ def _save_accounts(conn, item_id, institution_id, accounts, owns_transactions):
             "      > (SELECT rowid FROM items WHERE item_id = accounts.txn_item_id) THEN excluded.txn_item_id"
             "   ELSE accounts.txn_item_id END",
             (key, item_id, item_id if owns_transactions else None, item_id, a.get("name"), a.get("official_name"),
-             a.get("type"), a.get("subtype"), a.get("mask"), cents(bal.get("current")), cents(bal.get("available")),
-             cents(bal.get("limit")), bal.get("iso_currency_code"), now_iso()),
+             a.get("type"), a.get("subtype"), a.get("mask"), to_cents(bal.get("current")), to_cents(bal.get("available")),
+             to_cents(bal.get("limit")), bal.get("iso_currency_code"), now_iso()),
         )
         conn.execute("INSERT OR REPLACE INTO account_ids (account_id, account_key, item_id) VALUES (?, ?, ?)",
                      (a["account_id"], key, item_id))
@@ -152,7 +151,7 @@ def _save_holdings(conn, item_id, keys, inv):
             "INSERT OR REPLACE INTO holdings (account_key, security_id, item_id, quantity, value_cents, cost_basis_cents,"
             " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (keys.get(h["account_id"]) or _key_for(conn, h["account_id"]), h["security_id"], item_id, h.get("quantity"),
-             cents(h.get("institution_value")), cents(h.get("cost_basis")), now_iso()),
+             to_cents(h.get("institution_value")), to_cents(h.get("cost_basis")), now_iso()),
         )
 
 
@@ -165,7 +164,7 @@ def _save_transaction(conn, item_id, keys, t):
         "INSERT OR REPLACE INTO transactions (transaction_id, item_id, account_id, account_key, amount_cents, date,"
         " authorized_date, name, merchant_name, category, category_detailed, pending, pending_transaction_id, currency)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (t["transaction_id"], item_id, t["account_id"], key, cents(t["amount"]), t["date"], t.get("authorized_date"),
+        (t["transaction_id"], item_id, t["account_id"], key, to_cents(t["amount"]), t["date"], t.get("authorized_date"),
          t.get("name"), t.get("merchant_name"), pfc.get("primary"), pfc.get("detailed"), int(bool(t.get("pending"))),
          t.get("pending_transaction_id"), t.get("iso_currency_code")),
     )

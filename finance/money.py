@@ -8,12 +8,15 @@ Conventions (also in CLAUDE.md):
 import calendar
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 
 from finance import config
 
 # Plaid personal_finance_category values that are not spending.
 NOT_SPENDING_PRIMARY = {"INCOME", "TRANSFER_IN"}
-NOT_SPENDING_DETAILED = {"TRANSFER_OUT_ACCOUNT_TRANSFER", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"}
+# Money moved to the owner's own accounts; transfers to people (TRANSFER_OUT_FROM_APPS) still count.
+NOT_SPENDING_DETAILED = {"TRANSFER_OUT_ACCOUNT_TRANSFER", "TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS",
+                         "TRANSFER_OUT_SAVINGS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"}
 
 
 def is_spending(txn):
@@ -248,7 +251,10 @@ def bill_dates(bill, start, end):
 
 
 def to_cents(dollars):
-    return round(dollars * 100)
+    """Dollars (Plaid's floats, plan amounts) to integer cents, via Decimal so float noise never shifts a cent."""
+    if dollars is None:
+        return None
+    return int((Decimal(str(dollars)) * 100).quantize(Decimal(1), ROUND_HALF_UP))
 
 
 def _name_key(s):
@@ -567,7 +573,7 @@ def consent(item, now):
     if item.get("consent_expires_at"):
         expires, estimated = _when(item["consent_expires_at"]).date(), False
     elif item.get("institution_id") in config.CONSENT_MONTHS and item.get("first_seen_at"):
-        seen = _when(item["first_seen_at"]).date()
+        seen = _when(item.get("consent_since") or item["first_seen_at"]).date()
         expires, estimated = _add_months(seen, config.CONSENT_MONTHS[item["institution_id"]], seen.day), True
     else:
         return None

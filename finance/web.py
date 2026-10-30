@@ -18,7 +18,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import config, db, plan, sync, views
+from . import config, db, plan, store, sync, views
 
 log = logging.getLogger("finance")
 STATIC = Path(__file__).parent / "static"
@@ -120,7 +120,7 @@ async def run_sync(app):
 
 def _last_attempt():
     with contextlib.closing(db.connect()) as conn:
-        times = [it["last_attempt_at"] for it in views.store.items(conn) if it.get("last_attempt_at")]
+        times = [it["last_attempt_at"] for it in store.items(conn) if it.get("last_attempt_at")]
     return datetime.fromisoformat(max(times)) if times else None
 
 
@@ -141,21 +141,22 @@ async def sync_now(request: Request):
 
 async def scheduler(app):
     """Sync every SYNC_INTERVAL_HOURS; retry sooner while Plaid is still preparing an Item."""
+    ran_at, not_ready = None, False
     while True:
-        last = _last_attempt()
-        due = last + timedelta(hours=config.SYNC_INTERVAL_HOURS) if last else datetime.now(timezone.utc)
-        wait = (due - datetime.now(timezone.utc)).total_seconds()
+        last = max((t for t in (_last_attempt(), ran_at) if t), default=None)  # manual syncs count too
+        interval = (timedelta(minutes=config.NOT_READY_RETRY_MINUTES) if not_ready
+                    else timedelta(hours=config.SYNC_INTERVAL_HOURS))
+        wait = (last + interval - app.state.clock()).total_seconds() if last else 0
         if wait > 0:
             await asyncio.sleep(min(wait, 600))
             continue
+        ran_at = app.state.clock()
         try:
             results = await run_sync(app)
         except Exception:  # keep the scheduler alive; the error type is enough to diagnose
             log.exception("scheduled sync failed")
             results = []
-        if any(r["status"] == "not_ready" for r in results):
-            await asyncio.sleep(config.NOT_READY_RETRY_MINUTES * 60)
-            await run_sync(app)
+        not_ready = any(r["status"] == "not_ready" for r in results)
 
 
 def create_app(clock=None, make_client=None) -> Starlette:

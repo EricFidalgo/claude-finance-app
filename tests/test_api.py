@@ -150,3 +150,35 @@ def test_pages_forbid_outside_scripts_and_api_answers_are_never_cached(client):
     api = client.get("/api/accounts")
     assert api.headers["cache-control"] == "no-store"
     assert api.headers["x-content-type-options"] == "nosniff"
+
+
+def test_scheduler_retries_every_few_minutes_while_plaid_prepares_then_every_six_hours(data_dir, monkeypatch):
+    import asyncio
+    from datetime import timedelta
+
+    from finance import web
+
+    now = [NOW]
+    app = web.create_app(clock=lambda: now[0])
+    runs, statuses = [], iter(["not_ready", "not_ready", "error", "ok", "ok"])
+
+    class Done(Exception):
+        pass
+
+    async def fake_sync(_app):
+        runs.append(now[0])
+        status = next(statuses, None)
+        if status == "error":
+            raise RuntimeError("Plaid unreachable")
+        return [{"status": status}]
+
+    async def fake_sleep(seconds):
+        now[0] += timedelta(seconds=seconds)
+        if now[0] > NOW + timedelta(hours=13):
+            raise Done
+
+    monkeypatch.setattr(web, "run_sync", fake_sync)
+    monkeypatch.setattr(web.asyncio, "sleep", fake_sleep)
+    with pytest.raises(Done):
+        asyncio.run(web.scheduler(app))
+    assert [(t - NOW) / timedelta(minutes=1) for t in runs] == [0, 5, 10, 370, 730]

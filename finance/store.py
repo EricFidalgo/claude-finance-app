@@ -39,7 +39,7 @@ def items(conn):
     """Linked Items and their sync status. Never includes access tokens (they are not in the database)."""
     rows = conn.execute(
         "SELECT item_id, institution, institution_id, products, status, error_code, error_message,"
-        " consent_expires_at, first_seen_at, last_synced_at, last_attempt_at FROM items ORDER BY institution"
+        " consent_expires_at, consent_since, first_seen_at, last_synced_at, last_attempt_at FROM items ORDER BY institution"
     ).fetchall()
     return [{**dict(r), "products": json.loads(r["products"])} for r in rows]
 

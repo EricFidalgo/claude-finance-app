@@ -1,11 +1,10 @@
 """The owner's plan: data/plan.json, plain and hand-editable. Schema: docs/plan-schema.md.
 
-Amounts in the file are dollars (what a person types). Use `cents()` to bring them into the app's integer cents.
+Amounts in the file are dollars (what a person types). `money.to_cents()` brings them into the app's integer cents.
 """
 import json
 import os
 from datetime import date
-from decimal import Decimal
 
 from . import config
 
@@ -18,10 +17,6 @@ class PlanError(ValueError):
     def __init__(self, errors):
         super().__init__("; ".join(errors))
         self.errors = errors
-
-
-def cents(dollars):
-    return None if dollars is None else int((Decimal(str(dollars)) * 100).quantize(Decimal(1)))
 
 
 def _empty():

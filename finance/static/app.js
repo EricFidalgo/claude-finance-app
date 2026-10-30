@@ -496,7 +496,7 @@ async function screenMoney() {
     return row(it.institution,
       [ok ? statusLine('good', 'Connected') : statusLine('critical', it.error_code || it.status),
         it.last_synced_at ? `synced ${ago(it.last_synced_at)}` : 'never synced',
-        c && `re-link by ${fmtShort(c.expires)}${c.estimated ? ' (estimate)' : ''}`],
+        c && `re-link by ${fmtShort(c.expires)} (${c.estimated ? 'about ' : ''}${c.days_left} ${c.days_left === 1 ? 'day' : 'days'} left)`],
       null);
   })), h('p', { class: 'sub' }, 'To fix a login or re-link, run ./run.sh link on the computer.'));
   return [hero, accounts, runway, links];

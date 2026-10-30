@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS items (
   error_message TEXT,
   consent_expires_at TEXT,
   first_seen_at TEXT NOT NULL,
+  consent_since TEXT,
   last_synced_at TEXT,
   last_attempt_at TEXT
 );
@@ -91,6 +92,8 @@ def connect(path=None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    if "consent_since" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
+        conn.execute("ALTER TABLE items ADD COLUMN consent_since TEXT")  # databases from before re-link tracking
     return conn
 
 

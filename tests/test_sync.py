@@ -172,3 +172,28 @@ def test_relinked_bank_as_second_item_does_not_double_count_transactions(conn):
     first.pages["c1"] = page(next_cursor="c1")
     sync_item(conn, first, item(first))
     assert [t["transaction_id"] for t in store.transactions(conn)] == ["y1"]
+
+
+def test_relinking_restarts_the_estimated_consent_year(conn):
+    from datetime import date, datetime, timezone
+
+    from finance import money
+    from finance.sync import record_relink
+
+    fake = FakePlaid(accounts=[acct("chk", "1111")])
+    sync_item(conn, fake, item(fake))
+    conn.execute("UPDATE items SET first_seen_at = '2025-11-01T12:00:00+00:00'")  # linked almost a year ago
+    now = datetime.now(timezone.utc).isoformat()
+    assert money.consent(store.items(conn)[0], now)["days_left"] < 30
+
+    record_relink(conn, fake.item_id)
+
+    renewed = money.consent(store.items(conn)[0], now)
+    assert renewed["days_left"] >= 364 and date.fromisoformat(renewed["expires"]).year == date.today().year + 1
+
+
+def test_relinking_an_unknown_item_is_refused(conn):
+    from finance.sync import record_relink
+
+    with pytest.raises(LookupError):
+        record_relink(conn, "no-such-item")

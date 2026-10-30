@@ -14,9 +14,10 @@ One line each: what was chosen and why.
 
 - **Integer cents everywhere inside the app; dollars only in `data/plan.json`** (what a person types). Plaid's floats go through `Decimal` once, at sync.
 - **Plaid's sign is kept: positive is money out, negative is money in.** Flipping it in one place and not another is the classic bug; keeping the source's sign avoids that.
-- **Spending excludes income, transfers between own accounts and card payments; refunds net in; pending counts.** Otherwise paying the card bill would count every purchase twice.
+- **Spending excludes income, transfers to own accounts (Plaid's account, savings and investment transfers) and card payments; refunds net in; pending counts.** Otherwise paying the card bill would count every purchase twice. Zelle/Venmo payments to people (`TRANSFER_OUT_FROM_APPS`) count as spending.
 - **Accounts are keyed by institution family + mask** (`bofa:2222`). Merrill and Bank of America share a login and both report CMA-Edge, so it counts once in net worth.
 - **Safe-to-spend = (checking available − plan bills due before next payday and not yet paid − card balance owed − buffer) ÷ days to payday.** It shows a "fill in your plan" prompt, not a guess, until income and bills exist.
+- **Consent is estimated at 12 months for Bank of America** because Plaid reports no expiry date for it; the count restarts when a re-link through the link page succeeds.
 - **Card owed includes pending charges** (limit − available when the bank reports both), because that is what the next statement will ask for.
 
 ## Recurring charges and flags
@@ -29,7 +30,7 @@ One line each: what was chosen and why.
 ## Security and exposure
 
 - **Read-only products only** (`transactions`, `investments`). No code path can move money.
-- **Bound to 127.0.0.1; phone access via `tailscale serve`** (HTTPS inside the tailnet). Never Funnel, never a public port.
+- **Bound to 127.0.0.1; phone access via `tailscale serve`** (HTTPS inside the tailnet). Never Funnel, never a public port. Inside the container the servers listen on 0.0.0.0, which Docker needs; compose publishes them on the host's 127.0.0.1 only.
 - **Host allowlist** (localhost, 127.0.0.1, `*.ts.net`). A web page that points its own domain at 127.0.0.1 (DNS rebinding) gets a 400 instead of balances. Extra names via `FINANCE_EXTRA_HOSTS`.
 - **CSP `default-src 'self'`, `frame-ancestors 'none'`, `Cache-Control: no-store` on `/api/`.** No outside scripts, no framing, no balances in a browser cache.
 - **Bank names and merchant strings are untrusted text**: the UI builds the DOM with `textContent` only, never `innerHTML`.

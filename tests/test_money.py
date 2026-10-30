@@ -29,6 +29,15 @@ def test_spending_counts_outflows_nets_refunds_and_skips_transfers_income_and_ca
     assert money.spending_total(txns) == 1000 - 300 + 2500 + 800 + 41000
 
 
+def test_moving_money_to_own_savings_or_investments_is_not_spending_but_paying_people_is():
+    txns = [
+        t(20000, "2026-10-28", "TRANSFER_OUT", "Merrill", "TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS"),
+        t(10000, "2026-10-28", "TRANSFER_OUT", "BoA", "TRANSFER_OUT_SAVINGS"),
+        t(4500, "2026-10-28", "TRANSFER_OUT", "Venmo", "TRANSFER_OUT_TRANSFER_OUT_FROM_APPS"),  # paying a friend
+    ]
+    assert money.spending_total(txns) == 4500
+
+
 def test_spend_summary_month_to_date_compares_with_same_days_of_last_month():
     txns = [t(1000, "2026-10-01"), t(2000, "2026-10-15", "GROCERIES", "Aldi"),
             t(500, "2026-09-10"), t(9999, "2026-09-20"),  # Sep 20 is past "same day last month"
