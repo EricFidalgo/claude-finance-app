@@ -23,6 +23,13 @@ def plan_path() -> Path:
     return data_dir() / "plan.json"
 
 
+def allowed_hosts() -> list:
+    """Host names the app answers to: this machine and the tailnet (tailscale serve). Anything else is refused,
+    so a web page that points its own domain at 127.0.0.1 (DNS rebinding) cannot read the API."""
+    extra = [h.strip() for h in os.environ.get("FINANCE_EXTRA_HOSTS", "").split(",") if h.strip()]
+    return ["localhost", "127.0.0.1", "*.ts.net", *extra]
+
+
 def scheduler_enabled() -> bool:
     return os.environ.get("FINANCE_SCHEDULER", "on") != "off"
 

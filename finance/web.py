@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
@@ -20,6 +22,28 @@ from . import config, db, plan, sync, views
 
 log = logging.getLogger("finance")
 STATIC = Path(__file__).parent / "static"
+CSP = ("default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'; connect-src 'self'; "
+       "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+
+
+def security_headers(app):
+    """No outside scripts or framing on any page; API answers hold balances, so browsers must not cache them."""
+    async def wrapped(scope, receive, send):
+        if scope["type"] != "http":
+            return await app(scope, receive, send)
+        api = scope["path"].startswith("/api/")
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = [*message.get("headers", ()), (b"content-security-policy", CSP.encode()),
+                           (b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"no-referrer")]
+                if api:
+                    headers.append((b"cache-control", b"no-store"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await app(scope, receive, send_with_headers)
+    return wrapped
 
 
 def _ctx(request: Request):
@@ -163,6 +187,7 @@ def create_app(clock=None, make_client=None) -> Starlette:
             Route("/api/sync", sync_now, methods=["POST"]),
             Mount("/", StaticFiles(directory=STATIC, html=True, check_dir=False)),
         ],
+        middleware=[Middleware(TrustedHostMiddleware, allowed_hosts=config.allowed_hosts()), Middleware(security_headers)],
         lifespan=lifespan,
     )
     app.state.clock = clock or (lambda: datetime.now(timezone.utc))

@@ -96,7 +96,16 @@ def make_handler(client):
             self.end_headers()
             self.wfile.write(data)
 
+        def _foreign_host(self):
+            # Refuse other host names so a web page that points its domain at 127.0.0.1 cannot use this page.
+            if (self.headers.get("Host") or "").rsplit(":", 1)[0] in ("localhost", "127.0.0.1"):
+                return False
+            self._send(400, {"error": "use http://localhost:%d" % PORT})
+            return True
+
         def do_GET(self):
+            if self._foreign_host():
+                return
             if self.path == "/api/items":
                 return self._send(200, [{"item_id": i["item_id"], "institution": i.get("institution")}
                                         for i in load_items()])
@@ -105,6 +114,8 @@ def make_handler(client):
             self._send(200, PAGE.replace("__ENV__", client.env).encode(), "text/html; charset=utf-8")
 
         def do_POST(self):
+            if self._foreign_host():
+                return
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
             try:

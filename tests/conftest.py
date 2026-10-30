@@ -6,6 +6,7 @@ from starlette.testclient import TestClient
 def data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("FINANCE_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("FINANCE_SCHEDULER", "off")
+    monkeypatch.setenv("FINANCE_EXTRA_HOSTS", "testserver")  # TestClient's default Host
     return tmp_path
 
 

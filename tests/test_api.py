@@ -131,3 +131,22 @@ def test_no_endpoint_ever_returns_a_token_or_key(app, monkeypatch):
 def test_transactions_endpoint_filters_by_date_and_search(app):
     rows = app.get("/api/transactions?start=2026-10-21&q=aldi").json()["transactions"]
     assert [r["transaction_id"] for r in rows] == ["t2"]
+
+
+def test_requests_for_other_host_names_are_refused(client):
+    # A web page that rebinds its own domain to 127.0.0.1 must not be able to read the API.
+    assert client.get("/api/accounts", headers={"Host": "evil.example"}).status_code == 400
+    assert client.get("/api/accounts", headers={"Host": "localhost:8787"}).status_code == 200
+    assert client.get("/api/accounts", headers={"Host": "laptop.tail1234.ts.net"}).status_code == 200
+
+
+def test_pages_forbid_outside_scripts_and_api_answers_are_never_cached(client):
+    page = client.get("/")
+    assert page.status_code == 200
+    csp = page.headers["content-security-policy"]
+    assert "script-src 'self'" in csp and "frame-ancestors 'none'" in csp
+    assert page.headers["x-content-type-options"] == "nosniff"
+    assert page.headers["referrer-policy"] == "no-referrer"
+    api = client.get("/api/accounts")
+    assert api.headers["cache-control"] == "no-store"
+    assert api.headers["x-content-type-options"] == "nosniff"
