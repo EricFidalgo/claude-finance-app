@@ -569,7 +569,7 @@ def alerts(items, upcoming, unusual, now):
         name = it["institution"]
         if it["status"] == "login_required":
             found.append(_alert("urgent", "login_required", f"{name} needs you to sign in again",
-                                "Run ./run.sh link on the computer and choose Fix login. Data stops updating until then."))
+                                "Run ./run.sh link on the computer and press Fix login. Data stops updating until then."))
         elif it["status"] == "error":
             found.append(_alert("warn", "sync_error", f"{name} sync failed",
                                 f"{it.get('error_code') or 'Unknown error'}. The next sync will retry."))
