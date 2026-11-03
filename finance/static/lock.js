@@ -52,11 +52,13 @@
   const button = (text, primary) => { const c = C(); return el("button", { width: "100%", padding: "14px", fontSize: "17px", fontWeight: "600", borderRadius: "12px",
     border: primary ? "none" : `1px solid ${c.line}`, background: primary ? c.accent : "transparent", color: primary ? "#fff" : c.accent, cursor: "pointer", fontFamily: "inherit" }, text); };
 
-  let screen = null, waiting = null, release = null;
+  let screen = null, shown = null, waiting = null, release = null, asking = false, attempt = 0;
+  const showing = (info) => `${info.password_set}/${info.passkeys}`;
 
   function render(info) {
     const c = C();
     screen?.remove();
+    shown = showing(info);
     screen = el("div", { position: "fixed", inset: "0", zIndex: "2147483647", background: c.bg, color: c.fg, display: "flex", alignItems: "center", justifyContent: "center",
       padding: "max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom))", boxSizing: "border-box",
       fontFamily: "-apple-system, BlinkMacSystemFont, system-ui, sans-serif" });
@@ -86,14 +88,22 @@
 
     if (info.passkeys && window.PublicKeyCredential) {
       const fid = button("Unlock with Face ID", true);
-      fid.onclick = async () => { try { say(""); await faceIdUnlock(); finish(); } catch (e) { say(e.name === "NotAllowedError" ? "Face ID was cancelled. Try again or use the password." : e.message, true); } };
+      // A second Face ID request cancels the first on iPhone, so only the newest one reports back.
+      const tryFaceId = async () => {
+        const mine = ++attempt;
+        asking = true;
+        try { say(""); await faceIdUnlock(); finish(); }
+        catch (e) { if (mine === attempt) say(e.name === "NotAllowedError" ? "Face ID was cancelled. Try again or use the password." : e.message, true); }
+        finally { if (mine === attempt) asking = false; }
+      };
+      fid.onclick = tryFaceId;  // a tap always goes ahead
       box.append(fid);
-      // Try straight away; iOS may want a tap first, and then the button is there.
-      setTimeout(() => fid.onclick(), 50);
+      // Try once straight away, unless a request is already open; iOS may want a tap, and then the button is there.
+      setTimeout(() => { if (!asking) tryFaceId(); }, 50);
     }
     const form = el("form", { display: "flex", flexDirection: "column", gap: "12px", margin: "0" });
     const pw = el("input", { padding: "14px", fontSize: "17px", borderRadius: "12px", border: `1px solid ${c.line}`, background: c.field, color: c.fg, fontFamily: "inherit", width: "100%", boxSizing: "border-box" });
-    Object.assign(pw, { type: "password", autocomplete: "current-password", placeholder: "Password", name: "password" });
+    Object.assign(pw, { type: "password", inputMode: "numeric", autocomplete: "current-password", placeholder: "Password (numbers)", name: "password" });
     pw.setAttribute("aria-label", "Password");
     const go = button("Unlock with password", !info.passkeys);
     go.type = "submit";
@@ -111,6 +121,7 @@
   function offerFaceId() {
     const c = C();
     const box = screen.firstChild;
+    shown = "offer";
     box.replaceChildren(el("div", { fontSize: "28px", fontWeight: "700", textAlign: "center" }, "Use Face ID next time?"),
       el("div", { fontSize: "15px", color: c.sub, textAlign: "center" }, "Unlock with a glance instead of typing the password."));
     const msg = el("div", { fontSize: "15px", color: c.bad, textAlign: "center", minHeight: "20px" });
@@ -121,12 +132,15 @@
   }
 
   function finish() {
-    screen?.remove(); screen = null;
+    screen?.remove(); screen = null; shown = null;
     const r = release; waiting = null; release = null;
     r?.();
   }
 
   function lock(info) {
+    // The app's first request and the lock's own check both land here on opening: draw the screen once,
+    // and again only when what it should show has changed (a password set, Face ID removed, the offer up).
+    if (waiting && screen && shown === showing(info)) return waiting;
     if (!waiting) waiting = new Promise((res) => { release = res; });
     render(info);
     return waiting;

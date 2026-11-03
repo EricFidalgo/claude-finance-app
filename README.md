@@ -14,7 +14,7 @@ Screens: **Today** (what's left to spend today; what you've spent today, this we
 
 1. **Start it.** In this folder, run `./run.sh`. It builds the container and waits until http://127.0.0.1:8787 answers. Your Plaid keys are read from `~/.claude-secrets/env/` at that moment and never written anywhere.
 2. **Put it on your tailnet.** Run `tailscale serve --bg 8787`, then `tailscale serve status` to see the address (`https://ubuntu.your-tailnet.ts.net/`). This only uses HTTPS port 443, so it leaves any other serve ports alone. If it says HTTPS certificates are off, turn them on under DNS in the Tailscale admin console. If it needs root, run `sudo tailscale set --operator=$USER` once. Never use `tailscale funnel` for this app.
-3. **Set the phone password.** Run `./run.sh password` and type it twice. Until you do, the app on the phone shows a lock screen asking for it. This computer never needs it.
+3. **Set the phone password.** Run `./run.sh password` and type it twice: 6 or more numbers, so the phone shows its number pad. Until you do, the app on the phone shows a lock screen asking for it. This computer never needs it.
 4. **Install it on your iPhone.** With Tailscale connected, open that address in Safari, then Share → Add to Home Screen. Unlock with the password; it then offers Face ID for next time.
 5. **Fill in your plan.** On the Plan screen enter your take-home pay, next payday, bills and buffer; or ask Claude in this folder to fill it in from what you tell it. Until pay and bills are in, Today asks for them instead of guessing. The format is in [docs/plan-schema.md](docs/plan-schema.md).
 

@@ -82,8 +82,9 @@ class Lock:
 
     def set_password(self, password: str):
         """From the terminal. Ends every session and removes every passkey."""
-        if len(password) < MIN_PASSWORD:
-            raise ValueError(f"use at least {MIN_PASSWORD} characters")
+        # Numbers only, so the phone shows its number pad. The wait after wrong guesses keeps 6 digits slow to guess.
+        if not (password.isascii() and password.isdigit()) or len(password) < MIN_PASSWORD:
+            raise ValueError(f"use {MIN_PASSWORD} or more numbers, nothing else")
         with self._mutex:
             doc = self._load()
             salt = os.urandom(16)
@@ -228,7 +229,8 @@ class Lock:
             return {"challenge": challenge, "rpId": rp_id, "allowCredentials": mine,
                     "userVerification": "required", "timeout": 60000}
         return {"challenge": challenge, "rp": {"id": rp_id, "name": self.rp_name},
-                "user": {"id": doc["user_id"], "name": "owner", "displayName": self.rp_name},
+                # Both apps share one host, so each passkey carries its app's name to tell them apart in Passwords.
+                "user": {"id": doc["user_id"], "name": self.rp_name, "displayName": self.rp_name},
                 "pubKeyCredParams": [{"type": "public-key", "alg": -7}, {"type": "public-key", "alg": -257}],
                 "authenticatorSelection": {"authenticatorAttachment": "platform", "userVerification": "required",
                                            "residentKey": "preferred"},
@@ -271,7 +273,9 @@ class Lock:
                 _key_kind(load_der_public_key(spki))
                 keys = doc.setdefault("passkeys", [])
                 if not any(p["id"] == cred["id"] for p in keys):
+                    # The AAGUID says which app saved the passkey (Apple Passwords, Bitwarden, ...).
                     keys.append({"id": str(cred["id"]), "key": b64e(spki), "origin": origin, "count": count,
+                                 "aaguid": ad[37:53].hex(),
                                  "added": datetime.now(timezone.utc).isoformat(timespec="seconds")})
                     self._save(doc)
                 return len(keys)
@@ -338,7 +342,7 @@ def main(argv=None):
 
     argv = sys.argv[1:] if argv is None else argv
     path = Path(argv[0])
-    first = getpass.getpass("New password: ")
+    first = getpass.getpass(f"New password ({MIN_PASSWORD} or more numbers): ")
     if getpass.getpass("Again: ") != first:
         sys.exit("The two didn't match. Nothing changed.")
     try:

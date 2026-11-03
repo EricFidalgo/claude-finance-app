@@ -41,13 +41,13 @@ def pc(app):
         yield c
 
 
-def set_password(data_dir, password="correct horse"):
+def set_password(data_dir, password="246813"):
     from finance import lock
 
     lock.Lock(data_dir / "lock.json").set_password(password)
 
 
-def unlock(phone, password="correct horse"):
+def unlock(phone, password="246813"):
     return phone.post("/api/auth/password", json={"password": password}, headers=LOCK)
 
 
@@ -79,14 +79,14 @@ def test_the_right_password_unlocks_the_phone(phone, data_dir):
 
 def test_a_wrong_password_does_not_unlock(phone, data_dir):
     set_password(data_dir)
-    assert unlock(phone, "nope nope").status_code == 401
+    assert unlock(phone, "111111").status_code == 401
     assert phone.get("/api/today").status_code == 401
 
 
 def test_after_five_wrong_passwords_even_the_right_one_has_to_wait(phone, data_dir, clock):
     set_password(data_dir)
     for _ in range(5):
-        assert unlock(phone, "guess guess").status_code == 401
+        assert unlock(phone, "000000").status_code == 401
     r = unlock(phone)
     assert r.status_code == 429 and r.json()["retry_after"] > 0
     clock.t += r.json()["retry_after"]
@@ -96,10 +96,10 @@ def test_after_five_wrong_passwords_even_the_right_one_has_to_wait(phone, data_d
 def test_a_new_password_from_the_terminal_also_lifts_the_wait(phone, data_dir):
     set_password(data_dir)
     for _ in range(6):
-        unlock(phone, "guess guess")
+        unlock(phone, "000000")
     assert unlock(phone).status_code == 429
-    set_password(data_dir, "a whole new one")
-    assert unlock(phone, "a whole new one").status_code == 200
+    set_password(data_dir, "975310")
+    assert unlock(phone, "975310").status_code == 200
 
 
 def test_the_unlock_lapses_after_five_minutes_away(phone, data_dir, clock):
@@ -123,9 +123,9 @@ def test_locking_by_hand_ends_the_unlock(phone, data_dir):
 def test_a_new_password_from_the_terminal_ends_every_unlock(phone, data_dir):
     set_password(data_dir)
     unlock(phone)
-    set_password(data_dir, "a whole new one")
+    set_password(data_dir, "975310")
     assert phone.get("/api/today").status_code == 401
-    assert unlock(phone, "a whole new one").status_code == 200
+    assert unlock(phone, "975310").status_code == 200
 
 
 def test_with_no_password_set_the_phone_stays_locked(phone):
@@ -136,7 +136,7 @@ def test_with_no_password_set_the_phone_stays_locked(phone):
 
 def test_unlock_requests_need_the_custom_header_so_other_sites_cant_send_them(phone, data_dir):
     set_password(data_dir)
-    assert phone.post("/api/auth/password", json={"password": "correct horse"}).status_code == 403
+    assert phone.post("/api/auth/password", json={"password": "246813"}).status_code == 403
 
 
 # ---- Face ID (passkeys) ----------------------------------------------------------------------
@@ -257,7 +257,7 @@ def test_a_tap_without_face_id_actually_checking_the_face_is_refused(phone, data
 def test_a_new_password_from_the_terminal_removes_face_id(phone, data_dir):
     face = FakeFaceID()
     turn_on_face_id(phone, data_dir, face)
-    set_password(data_dir, "a whole new one")
+    set_password(data_dir, "975310")
     assert phone.get("/api/auth").json()["passkeys"] == 0
     r = phone.post("/api/auth/passkey/options", json={"kind": "login"}, headers=LOCK)
     assert r.status_code == 409
@@ -270,3 +270,18 @@ def test_a_face_id_setup_whose_key_id_does_not_match_the_authenticator_is_refuse
     bad = face.create(options(phone, "register"), reported_id=os.urandom(16))
     assert phone.post("/api/auth/passkey/register", json={"credential": bad}, headers=LOCK).status_code == 400
     assert phone.get("/api/auth").json()["passkeys"] == 0
+
+
+def test_the_password_is_numbers_only_so_the_phone_shows_the_number_pad(data_dir):
+    with pytest.raises(ValueError):
+        set_password(data_dir, "abc123")
+    with pytest.raises(ValueError):
+        set_password(data_dir, "12345")   # too short
+    set_password(data_dir, "123456")
+
+
+def test_the_face_id_key_is_named_after_the_app_since_the_panel_shares_its_host(phone, data_dir):
+    set_password(data_dir)
+    unlock(phone)
+    user = options(phone, "register")["user"]
+    assert user["name"] == "Money" and user["displayName"] == "Money"
