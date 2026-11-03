@@ -3,3 +3,6 @@ __pycache__/
 .venv/
 .pytest_cache/
 *.pyc
+# The owner's own notes: kept on this computer, never pushed.
+BUILD_PROMPT.md
+research/

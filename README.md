@@ -1,10 +1,10 @@
 # Finance tracker
 
-A private finance app that runs on this computer. It reads Bank of America (checking …1111, credit card …3333) and Merrill (CMA-Edge …2222) through Plaid, and you open it on your phone over Tailscale.
+A private finance app that runs on your own computer. It reads your bank and brokerage accounts through Plaid (Bank of America and Merrill are handled, including the CMA-Edge account both report), and you open it on your phone over Tailscale.
 
 It is read-only: it asks Plaid for `transactions` and `investments` only, so no code path can move money.
 
-Investments Plaid can't see (Fidelity, Vanguard, the TSP) are typed into `data/manual.json` and priced daily from Yahoo Finance and tsp.gov; see [Investments you enter by hand](#investments-you-enter-by-hand).
+Investments Plaid can't see (a fund company account, the TSP) are typed into `data/manual.json` and priced daily from Yahoo Finance and tsp.gov; see [Investments you enter by hand](#investments-you-enter-by-hand).
 
 Screens: **Today** (what's left to spend today; what you've spent today, this week and this pay period; anything that needs you; your latest transactions and a few tips), **Spending** (by category, against last period), **Transactions** (any period or dates, with search; tap a total, a category or a merchant to get there), **Bills** (a calendar of paydays and bills, and the schedule), **Money** (accounts, net worth, connections), **Investing** (value over time, where it could grow, holdings), **Plan**, and **Ask Claude** (copies a text summary to paste into a chat).
 
@@ -13,7 +13,7 @@ Screens: **Today** (what's left to spend today; what you've spent today, this we
 ## Setup (once)
 
 1. **Start it.** In this folder, run `./run.sh`. It builds the container and waits until http://127.0.0.1:8787 answers. Your Plaid keys are read from `~/.claude-secrets/env/` at that moment and never written anywhere.
-2. **Put it on your tailnet.** Run `tailscale serve --bg 8787`, then `tailscale serve status` to see the address (`https://ubuntu.your-tailnet.ts.net/`). This only uses HTTPS port 443, so it leaves your existing serve on `:4533` alone. If it says HTTPS certificates are off, turn them on under DNS in the Tailscale admin console. If it needs root, run `sudo tailscale set --operator=$USER` once. Never use `tailscale funnel` for this app.
+2. **Put it on your tailnet.** Run `tailscale serve --bg 8787`, then `tailscale serve status` to see the address (`https://ubuntu.your-tailnet.ts.net/`). This only uses HTTPS port 443, so it leaves any other serve ports alone. If it says HTTPS certificates are off, turn them on under DNS in the Tailscale admin console. If it needs root, run `sudo tailscale set --operator=$USER` once. Never use `tailscale funnel` for this app.
 3. **Set the phone password.** Run `./run.sh password` and type it twice. Until you do, the app on the phone shows a lock screen asking for it. This computer never needs it.
 4. **Install it on your iPhone.** With Tailscale connected, open that address in Safari, then Share → Add to Home Screen. Unlock with the password; it then offers Face ID for next time.
 5. **Fill in your plan.** On the Plan screen enter your take-home pay, next payday, bills and buffer; or ask Claude in this folder to fill it in from what you tell it. Until pay and bills are in, Today asks for them instead of guessing. The format is in [docs/plan-schema.md](docs/plan-schema.md).
