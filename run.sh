@@ -6,6 +6,7 @@
 #   ./run.sh sync     sync with Plaid now
 #   ./run.sh down     stop the container (data in ./data is kept)
 #   ./run.sh logs     follow the container's logs
+#   ./run.sh password set the phone unlock password (also the way back in; turns Face ID off)
 #
 # Plaid keys are read from ~/.claude-secrets/env/ into exported shell variables and passed through
 # to compose by name, so they appear on no command line and in no file this project writes.
@@ -55,5 +56,9 @@ case "${1:-up}" in
     ;;
   down) docker compose down ;;
   logs) docker compose logs -f ;;
-  *) sed -n '2,9p' "$0"; exit 1 ;;
+  password)
+    running || up
+    docker compose exec -it app python -m finance.lock /app/data/lock.json
+    ;;
+  *) sed -n '2,10p' "$0"; exit 1 ;;
 esac

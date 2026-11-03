@@ -7,18 +7,20 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import config, db, manual, money, plan, prices, store, sync, views
+from . import config, db, lock, manual, money, plan, prices, store, sync, views
 
 log = logging.getLogger("finance")
 STATIC = Path(__file__).parent / "static"
@@ -44,6 +46,26 @@ def security_headers(app):
 
         await app(scope, receive, send_with_headers)
     return wrapped
+
+
+def locked(app, the_lock):
+    """Phone requests to the API get a 401 until they unlock; see lock.py. Pages and scripts stay open
+    so the lock screen can load."""
+    async def wrapped(scope, receive, send):
+        if scope["type"] == "http" and await asyncio.to_thread(the_lock.blocks, scope["path"], Headers(scope=scope)):
+            return await JSONResponse({"locked": True}, status_code=401)(scope, receive, send)
+        await app(scope, receive, send)
+    return wrapped
+
+
+async def auth(request: Request):
+    # Off the event loop: a password check runs scrypt, which takes a moment on purpose.
+    status, body, cookie = await asyncio.to_thread(request.app.state.lock.handle, request.method, request.url.path,
+                                                   request.headers, await request.body())
+    response = JSONResponse(body, status_code=status)
+    if cookie:
+        response.headers["set-cookie"] = cookie
+    return response
 
 
 def _ctx(request: Request):
@@ -253,7 +275,9 @@ async def scheduler(app):
         not_ready = any(r["status"] == "not_ready" for r in results)
 
 
-def create_app(clock=None, make_client=None, get_url=None) -> Starlette:
+def create_app(clock=None, make_client=None, get_url=None, lock_clock=None) -> Starlette:
+    the_lock = lock.Lock(config.lock_path(), cookie="money_lock", clock=lock_clock or time.time, rp_name="Money")
+
     @contextlib.asynccontextmanager
     async def lifespan(app):
         os.umask(0o077)  # database and plan files are readable by the owner only
@@ -268,6 +292,8 @@ def create_app(clock=None, make_client=None, get_url=None) -> Starlette:
     app = Starlette(
         routes=[
             Route("/health", health),
+            Route("/api/auth", auth, methods=["GET", "POST"]),
+            Route("/api/auth/{action:path}", auth, methods=["GET", "POST"]),
             Route("/api/status", screen(views.status)),
             Route("/api/today", screen(views.today)),
             Route("/api/spending", spending),
@@ -286,9 +312,11 @@ def create_app(clock=None, make_client=None, get_url=None) -> Starlette:
             Route("/api/sync", sync_now, methods=["POST"]),
             Mount("/", StaticFiles(directory=STATIC, html=True, check_dir=False)),
         ],
-        middleware=[Middleware(TrustedHostMiddleware, allowed_hosts=config.allowed_hosts()), Middleware(security_headers)],
+        middleware=[Middleware(TrustedHostMiddleware, allowed_hosts=config.allowed_hosts()), Middleware(security_headers),
+                    Middleware(locked, the_lock=the_lock)],
         lifespan=lifespan,
     )
+    app.state.lock = the_lock
     app.state.clock = clock or (lambda: datetime.now(timezone.utc))
     app.state.make_client = make_client
     app.state.get_url = get_url or prices.http_get
