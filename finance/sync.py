@@ -16,7 +16,7 @@ def account_key(institution_id, account):
     return f"{family}:{account.get('mask') or account['account_id']}"
 
 
-# Plaid errors that need the owner to re-link through Link update mode (./run.sh link).
+# Plaid errors that need the owner to re-link through Link update mode (Fix login on the Money screen).
 LOGIN_CODES = {"ITEM_LOGIN_REQUIRED", "ACCESS_NOT_GRANTED", "NO_ACCOUNTS", "INVALID_ACCESS_TOKEN", "ITEM_NOT_FOUND"}
 MUTATION = "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
 
@@ -104,6 +104,32 @@ def record_relink(conn, item_id):
         raise LookupError(item_id)
 
 
+def forget_item(conn, item_id):
+    """Delete everything stored for an Item the owner removed. An account another Item also reports (CMA-Edge,
+    through both Bank of America and Merrill) stays, now owned by that Item."""
+    with db.transaction(conn):
+        for table in ("transactions", "holdings", "account_ids", "sync_log"):
+            conn.execute(f"DELETE FROM {table} WHERE item_id = ?", (item_id,))
+        for (key,) in conn.execute("SELECT account_key FROM accounts WHERE item_id = :i OR txn_item_id = :i",
+                                   {"i": item_id}).fetchall():
+            others = [r["item_id"] for r in conn.execute(
+                "SELECT a.item_id FROM account_ids a JOIN items i USING (item_id) WHERE a.account_key = ?"
+                " GROUP BY a.item_id ORDER BY MAX(i.rowid) DESC", (key,))]
+            if not others:
+                conn.execute("DELETE FROM accounts WHERE account_key = ?", (key,))
+                continue
+            # Transactions come from the most recently linked remaining Item that has them, as in _save_accounts.
+            txn_owner = next((o for o in others if conn.execute(
+                "SELECT 1 FROM items WHERE item_id = ? AND products LIKE '%\"transactions\"%'", (o,)).fetchone()), None)
+            conn.execute("UPDATE accounts SET institution = CASE WHEN item_id = :gone THEN"
+                         " (SELECT institution FROM items WHERE item_id = :owner) ELSE institution END,"
+                         " item_id = CASE WHEN item_id = :gone THEN :owner ELSE item_id END,"
+                         " txn_item_id = CASE WHEN txn_item_id = :gone THEN :txn_owner ELSE txn_item_id END"
+                         " WHERE account_key = :key", {"gone": item_id, "owner": others[0], "txn_owner": txn_owner, "key": key})
+        conn.execute("DELETE FROM securities WHERE security_id NOT IN (SELECT security_id FROM holdings)")
+        conn.execute("DELETE FROM items WHERE item_id = ?", (item_id,))
+
+
 def _update_item(conn, item_id, info):
     conn.execute("UPDATE items SET institution_id = ?, products = ?, consent_expires_at = ? WHERE item_id = ?",
                  (info.get("institution_id"), json.dumps(info.get("products") or []),
@@ -176,7 +202,7 @@ def _key_for(conn, account_id):
 
 
 def sync_all(conn, make_client=None):
-    """Sync every Item in data/items.json. Returns one result per Item (no tokens, no amounts)."""
+    """Sync every Item in items.json. Returns one result per Item (no tokens, no amounts)."""
     from .plaid import PlaidClient, load_items
 
     make_client = make_client or PlaidClient

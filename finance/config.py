@@ -5,9 +5,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def default_data_dir() -> Path:
+    """Outside the repo, so a push can never carry the owner's data. run.sh mounts the same folder into the container."""
+    return Path.home() / ".local/share/finance-tracker"
+
+
 def data_dir() -> Path:
-    path = Path(os.environ.get("FINANCE_DATA_DIR") or ROOT / "data")
-    path.mkdir(parents=True, exist_ok=True)
+    path = Path(os.environ.get("FINANCE_DATA_DIR") or default_data_dir())
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
     return path
 
 
@@ -37,6 +42,11 @@ def allowed_hosts() -> list:
     so a web page that points its own domain at 127.0.0.1 (DNS rebinding) cannot read the API."""
     extra = [h.strip() for h in os.environ.get("FINANCE_EXTRA_HOSTS", "").split(",") if h.strip()]
     return ["localhost", "127.0.0.1", "*.ts.net", *extra]
+
+
+def plaid_env() -> str:
+    """Where new banks are linked: production, or sandbox (Plaid's test banks) with FINANCE_PLAID_ENV=sandbox."""
+    return "sandbox" if os.environ.get("FINANCE_PLAID_ENV") == "sandbox" else "production"
 
 
 def scheduler_enabled() -> bool:

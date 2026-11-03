@@ -4,7 +4,7 @@
 """
 from datetime import datetime, timedelta
 
-from . import money, prices, store
+from . import connections, money, prices, store
 
 PERIODS = ("today", "week", "pay_period", "last_week", "month", "last_month")
 ACCOUNT_ORDER = {"depository": 0, "credit": 1, "loan": 2, "investment": 3}
@@ -52,7 +52,7 @@ def status(ctx):
     return {
         "now": ctx["now"].isoformat(timespec="seconds"),
         "last_synced_at": _last_synced(ctx),
-        "items": [{"institution": it["institution"], "products": it["products"], "status": it["status"],
+        "items": [{"id": connections.connection_id(it["item_id"]), "institution": it["institution"], "products": it["products"], "status": it["status"],
                    "error_code": it["error_code"], "last_synced_at": it["last_synced_at"],
                    "last_attempt_at": it["last_attempt_at"], "consent": money.consent(it, ctx["now"].isoformat())}
                   for it in ctx["items"]],

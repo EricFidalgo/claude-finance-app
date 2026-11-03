@@ -1,7 +1,7 @@
-"""Minimal Plaid REST client (stdlib only) and the token store data/items.json.
+"""Minimal Plaid REST client (stdlib only) and the token store items.json.
 
 Read-only by scope: the app only ever requests the `transactions` and `investments` products.
-Keys come from env vars; access tokens live only in data/items.json (mode 600) and never reach
+Keys come from env vars; access tokens live only in items.json (mode 600) and never reach
 the browser, the database, a log line or an error message.
 """
 import json
@@ -64,11 +64,25 @@ def load_items():
 
 
 def save_item(item):
-    """Add or replace an Item in data/items.json (mode 600)."""
-    items = [i for i in load_items() if i["item_id"] != item["item_id"]] + [item]
-    fd = os.open(config.items_path(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    """Add or replace an Item in items.json (mode 600)."""
+    _write_items([i for i in load_items() if i["item_id"] != item["item_id"]] + [item])
+
+
+def remove_item(item_id):
+    """Drop an Item's access token from items.json."""
+    _write_items([i for i in load_items() if i["item_id"] != item_id])
+
+
+def _write_items(items):
+    # A new file renamed over the old one, so a crash mid-write never leaves a half-written token file.
+    path = config.items_path()
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(items, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def now_iso():

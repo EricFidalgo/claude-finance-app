@@ -1,6 +1,6 @@
 """SQLite storage. Amounts are integer cents; positive means money out (Plaid's convention).
 
-No access token is ever stored here: tokens live only in data/items.json.
+No access token is ever stored here: tokens live only in items.json.
 """
 import sqlite3
 
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS holdings (
   updated_at TEXT,
   PRIMARY KEY (account_key, security_id)
 );
--- Daily prices for the holdings in data/manual.json, which no bank reports.
+-- Daily prices for the holdings in manual.json, which no bank reports.
 CREATE TABLE IF NOT EXISTS prices (
   symbol TEXT NOT NULL,
   date TEXT NOT NULL,

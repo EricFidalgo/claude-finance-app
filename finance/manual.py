@@ -1,4 +1,4 @@
-"""Investments the owner types in: data/manual.json, for accounts Plaid can't link. Schema: docs/manual-schema.md.
+"""Investments the owner types in: manual.json, for accounts Plaid can't link. Schema: docs/manual-schema.md.
 
 Amounts in the file are dollars and quantities are shares. `prices` fetches what they're worth;
 `money.manual_holdings` values them.

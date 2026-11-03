@@ -547,7 +547,7 @@ def test_alerts_rank_login_and_uncovered_bills_above_unusual_charges_and_stale_s
 
     assert [(x["level"], x["kind"]) for x in found] == [
         ("urgent", "login_required"), ("urgent", "uncovered_bill"), ("warn", "unusual_charge"), ("warn", "stale_sync")]
-    assert "Bank of America" in found[0]["title"] and "./run.sh link" in found[0]["detail"]
+    assert "Bank of America" in found[0]["title"] and "Fix login" in found[0]["detail"]
     assert "Merrill" in found[3]["title"]
     assert found[1]["detail"] == "$1,500.00 due Sun, Nov 1."  # dates read as words: these show on the phone as-is
     assert found[2]["title"] == "Diner $42.50 on Mon, Oct 26"

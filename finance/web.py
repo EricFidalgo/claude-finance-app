@@ -1,6 +1,6 @@
 """The app: JSON API, static phone UI and the background sync scheduler.
 
-Every response is built from the local database and data/plan.json. Access tokens live only in data/items.json,
+Every response is built from the local database and plan.json. Access tokens live only in items.json,
 which nothing here reads except the sync, so no response can carry one.
 """
 import asyncio
@@ -20,12 +20,17 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import config, db, lock, manual, money, plan, prices, store, sync, views
+from . import config, connections, db, lock, manual, money, plan, prices, store, sync, views
+from .plaid import PlaidClient, PlaidError
 
 log = logging.getLogger("finance")
 STATIC = Path(__file__).parent / "static"
-CSP = ("default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'; connect-src 'self'; "
-       "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+# Plaid Link is the one outside script: the Money screen loads it on demand to add or fix a bank, and it runs
+# inside Plaid's own frame. Plaid already holds what the app shows, so this lets no data go anywhere new.
+PLAID_LINK_JS = "https://cdn.plaid.com/link/v2/stable/link-initialize.js"
+CSP = (f"default-src 'self'; img-src 'self' data:; script-src 'self' {PLAID_LINK_JS}; style-src 'self'; "
+       "connect-src 'self'; frame-src https://cdn.plaid.com; base-uri 'none'; form-action 'self'; "
+       "frame-ancestors 'none'")
 
 
 def security_headers(app):
@@ -193,7 +198,7 @@ def get_manual(request: Request):
 
 
 async def put_manual(request: Request):
-    """Save data/manual.json, then price it at once so a mistyped symbol shows up in the answer."""
+    """Save manual.json, then price it at once so a mistyped symbol shows up in the answer."""
     try:
         body = await request.json()
     except ValueError:
@@ -252,7 +257,92 @@ async def sync_now(request: Request):
     last = _last_attempt()
     if not force and last and app.state.clock() - last < timedelta(minutes=config.MANUAL_SYNC_MIN_MINUTES):
         return JSONResponse({"status": "skipped", "last_attempt_at": last.isoformat()})
-    return JSONResponse({"status": "synced", "results": await run_sync(app)})
+    results = [{"id": connections.connection_id(r["item_id"]), **{k: v for k, v in r.items() if k != "item_id"}}
+               for r in await run_sync(app)]
+    return JSONResponse({"status": "synced", "results": results})
+
+
+# --- connections (banks linked through Plaid)
+
+async def _body(request):
+    """The JSON object a write sent. JSON only, so another site's page can't send one without a CORS preflight."""
+    if request.headers.get("content-type", "").split(";")[0].strip() != "application/json":
+        raise ValueError("send JSON (Content-Type: application/json)")
+    try:
+        body = await request.json()
+    except ValueError:
+        raise ValueError("body must be JSON") from None
+    if not isinstance(body, dict):
+        raise ValueError("body must be a JSON object")
+    return body
+
+
+def _plaid_errors(fn):
+    """Plaid's code and message only, never the request; an unknown connection is a 404."""
+    async def endpoint(request: Request):
+        try:
+            return await fn(request)
+        except PlaidError as e:
+            return JSONResponse({"error": f"{e.code}: {e.message}"}, status_code=502)
+        except LookupError:
+            return JSONResponse({"error": "no such connection"}, status_code=404)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+    return endpoint
+
+
+def _in_db(fn, *args):
+    with contextlib.closing(db.connect()) as conn:
+        return fn(conn, *args)
+
+
+@_plaid_errors
+async def link_token(request: Request):
+    body = await _body(request)
+    token = await asyncio.to_thread(_in_db, connections.link_token, request.app.state.make_client,
+                                    body.get("kind"), body.get("id"))
+    return JSONResponse({"link_token": token})
+
+
+async def _sync_after_link(app, item_id, name, done):
+    """Sync so the bank shows up at once, and say how that went for this bank."""
+    result = next((r for r in await run_sync(app) if r["item_id"] == item_id), {"status": "error"})
+    if result["status"] == "ok":
+        return {"message": f"{done} {name}.", "status": "ok"}
+    if result["status"] == "not_ready":
+        return {"message": f"{done} {name}. Plaid is still gathering its data; it shows up within a few hours.",
+                "status": "not_ready"}
+    return {"message": f"{done} {name}, but the first sync failed ({result.get('error_code') or 'error'}). "
+                       "It retries on its own.", "status": result["status"]}
+
+
+@_plaid_errors
+async def add_connection(request: Request):
+    body = await _body(request)
+    public_token, name = body.get("public_token"), body.get("institution")
+    if not isinstance(public_token, str) or not public_token:
+        raise ValueError("public_token is required")
+    name = name.strip()[:80] if isinstance(name, str) and name.strip() else "Unnamed bank"
+    async with request.app.state.sync_lock:  # a removal in progress rewrites items.json too
+        item_id = await asyncio.to_thread(connections.add, request.app.state.make_client, public_token, name)
+    return JSONResponse(await _sync_after_link(request.app, item_id, name, "Linked"))
+
+
+@_plaid_errors
+async def connection_renewed(request: Request):
+    await _body(request)
+    item_id = await asyncio.to_thread(_in_db, connections.renewed, request.path_params["cid"])
+    name = next((it["institution"] for it in await asyncio.to_thread(_in_db, store.items)
+                 if it["item_id"] == item_id), None) or "the bank"
+    return JSONResponse(await _sync_after_link(request.app, item_id, name, "Updated"))
+
+
+@_plaid_errors
+async def remove_connection(request: Request):
+    async with request.app.state.sync_lock:  # a sync running now would write the bank's data back
+        name = await asyncio.to_thread(_in_db, connections.remove, request.app.state.make_client,
+                                       request.path_params["cid"])
+    return JSONResponse({"message": f"Removed {name or 'the bank'} and everything stored from it."})
 
 
 async def scheduler(app):
@@ -310,6 +400,10 @@ def create_app(clock=None, make_client=None, get_url=None, lock_clock=None) -> S
             Route("/api/manual", get_manual, methods=["GET"]),
             Route("/api/manual", put_manual, methods=["PUT"]),
             Route("/api/sync", sync_now, methods=["POST"]),
+            Route("/api/connections", add_connection, methods=["POST"]),
+            Route("/api/connections/link_token", link_token, methods=["POST"]),
+            Route("/api/connections/{cid}/renewed", connection_renewed, methods=["POST"]),
+            Route("/api/connections/{cid}", remove_connection, methods=["DELETE"]),
             Mount("/", StaticFiles(directory=STATIC, html=True, check_dir=False)),
         ],
         middleware=[Middleware(TrustedHostMiddleware, allowed_hosts=config.allowed_hosts()), Middleware(security_headers),
@@ -318,7 +412,7 @@ def create_app(clock=None, make_client=None, get_url=None, lock_clock=None) -> S
     )
     app.state.lock = the_lock
     app.state.clock = clock or (lambda: datetime.now(timezone.utc))
-    app.state.make_client = make_client
+    app.state.make_client = make_client or PlaidClient
     app.state.get_url = get_url or prices.http_get
     return app
 

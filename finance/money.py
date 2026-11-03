@@ -339,7 +339,7 @@ def safe_to_spend(accounts, plan, txns, today):
     }
 
 
-# --- manually entered holdings (data/manual.json)
+# --- manually entered holdings (manual.json)
 
 def slug(name):
     return "-".join("".join(c if c.isalnum() else " " for c in name.lower()).split())
@@ -390,7 +390,7 @@ def manual_shares(holding, series, income, today):
 
 
 def manual_holdings(doc, prices, income, today):
-    """Accounts and holdings from data/manual.json, valued at the latest stored price.
+    """Accounts and holdings from manual.json, valued at the latest stored price.
 
     `prices` maps symbol -> [(ISO date, price)], oldest first. Rows are shaped like `store.accounts` and
     `store.holdings`, so net worth, allocation and the snapshot treat them like linked ones.
@@ -853,7 +853,7 @@ def alerts(items, upcoming, unusual, now):
         since = (it["item_id"], it.get("last_synced_at"))
         if it["status"] == "login_required":
             found.append(_alert("urgent", "login_required", since, f"{name} needs you to sign in again",
-                                "Run ./run.sh link on the computer and press Fix login. Data stops updating until then."))
+                                "On the Money screen, under Connections, tap Fix login. Data stops updating until then."))
         elif it["status"] == "error":
             found.append(_alert("warn", "sync_error", since, f"{name} sync failed",
                                 f"{it.get('error_code') or 'Unknown error'}. The next sync will retry."))
@@ -865,8 +865,8 @@ def alerts(items, upcoming, unusual, now):
             level = "urgent" if c["days_left"] <= 7 else "warn"
             found.append(_alert(level, "consent_expiring", (it["item_id"], c["expires"], level),
                                 f"{name} access ends in {c['days_left']} days",
-                                f"{'About ' if c['estimated'] else ''}{_day(c['expires'])}. Re-link with ./run.sh link "
-                                "before then to keep data flowing."))
+                                f"{'About ' if c['estimated'] else ''}{_day(c['expires'])}. Tap Fix login under "
+                                "Connections on the Money screen before then to keep data flowing."))
     for b in upcoming["bills"]:
         if b.get("covered") is False:
             found.append(_alert("urgent", "uncovered_bill", (b["name"], b["due"], b["amount_cents"]),

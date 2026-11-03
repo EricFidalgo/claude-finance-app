@@ -5,8 +5,8 @@ The owner's private finance app: Plaid (read-only) → SQLite → a phone PWA at
 ## Guardrails
 
 - **Read-only.** Request only the `transactions` and `investments` Plaid products, so no code path can move money.
-- **Secrets stay in env vars.** Tokens and keys appear in no log, error, commit, image layer or API response; the browser receives data, never tokens. `data/items.json` holds the access tokens and stays unopened.
-- **Real data stays local.** Tests and screenshots use fixtures, Plaid Sandbox or the demo server. Against the real app, run counts and automated checks (scrollWidth, JS errors), and read real transactions only when the owner asks a question about them.
+- **Secrets stay in env vars.** Tokens and keys appear in no log, error, commit, image layer or API response; the browser receives data, never tokens. `items.json` in the data folder holds the access tokens and stays unopened. Inspect compose with `docker compose config --no-interpolate`: plain `config` prints the Plaid keys the SessionStart hook loaded.
+- **Real data stays in the data folder** (`~/.local/share/finance-tracker`, outside the repo); the repo holds code, docs and fixtures. Tests and screenshots use fixtures, Plaid Sandbox or the demo server. Against the real app, run counts and automated checks (scrollWidth, JS errors), and read real transactions only when the owner asks a question about them.
 - **Exposure is 127.0.0.1 plus `tailscale serve`.** Funnel and public ports stay off.
 - **The owner runs `./run.sh`.** It reads the Plaid keys; you edit it and leave executing it to them.
 

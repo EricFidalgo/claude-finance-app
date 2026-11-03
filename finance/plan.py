@@ -1,4 +1,4 @@
-"""The owner's plan: data/plan.json, plain and hand-editable. Schema: docs/plan-schema.md.
+"""The owner's plan: plan.json, plain and hand-editable. Schema: docs/plan-schema.md.
 
 Amounts in the file are dollars (what a person types). `money.to_cents()` brings them into the app's integer cents.
 """

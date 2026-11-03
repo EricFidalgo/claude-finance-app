@@ -78,6 +78,8 @@ class FakePlaid:
             return {"accounts": self.accounts}
         if path == "/transactions/sync":
             return self.pages.get(body["cursor"]) or page(next_cursor=body["cursor"])  # caught up: nothing new
+        if path == "/item/remove":
+            return {"request_id": "fake"}
         if path == "/investments/holdings/get":
             return {"accounts": self.accounts, "holdings": self.holdings, "securities": self.securities}
         raise AssertionError(f"unexpected Plaid call {path}")
@@ -98,13 +100,34 @@ def holding(account_id, security_id, quantity, value, cost_basis=None):
 
 
 class FakeBank:
-    """Plaid as a whole: routes each call to the FakePlaid that owns the request's access token."""
+    """Plaid as a whole: routes each call to the FakePlaid that owns the request's access token.
+
+    Linking: `bank.waiting["public-token"] = FakePlaid(...)` is a bank the owner just finished Plaid Link for;
+    exchanging that public token hands out an access token for it. /item/remove forgets the token, as Plaid does."""
 
     def __init__(self, **fakes_by_token):
         self.fakes = fakes_by_token
+        self.waiting = {}
+        self.link_requests = []
+        self.removed = []
 
     def post(self, path, body):
-        return self.fakes[body["access_token"]].post(path, body)
+        if path == "/link/token/create":
+            self.link_requests.append(body)
+            return {"link_token": f"link-sandbox-{len(self.link_requests)}", "expiration": "2026-10-29T20:00:00Z"}
+        if path == "/item/public_token/exchange":
+            if body["public_token"] not in self.waiting:
+                raise PlaidError("INVALID_PUBLIC_TOKEN", "fake: unknown public token")
+            fake = self.waiting.pop(body["public_token"])
+            token = f"access-sandbox-{fake.item_id}-SECRET"
+            self.fakes[token] = fake
+            return {"item_id": fake.item_id, "access_token": token}
+        if body.get("access_token") not in self.fakes:
+            raise PlaidError("ITEM_NOT_FOUND", "fake: no such item")
+        res = self.fakes[body["access_token"]].post(path, body)
+        if path == "/item/remove":
+            self.removed.append(self.fakes.pop(body["access_token"]).item_id)
+        return res
 
 
 class FakeFeed:

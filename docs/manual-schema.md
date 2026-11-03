@@ -1,4 +1,4 @@
-# `data/manual.json`
+# `manual.json`
 
 Investments Plaid can't link (a fund company, the TSP), typed in by hand. Edit the file, or `PUT /api/manual` with the whole document; there is no screen for it. Missing file means no manual investments.
 
@@ -40,7 +40,7 @@ You enter **shares**, or a **balance in dollars** for an account that reports on
 
 - **Prices**: the latest daily close, from Yahoo Finance for tickers and from tsp.gov's price history for TSP funds. They are fetched when the file is saved through the API and after every sync (each 6 hours). A mutual fund posts its price after the market closes, so during the day the value is the previous close; the Investing screen says which day.
 - **Shares**: a `shares` holding is worth shares × the latest price.
-- **Balance**: `balance ÷ price on as_of` shares, plus `per_paycheck ÷ that day's price` for each payday in the plan (`data/plan.json` income) after `as_of`, up to today. Paydays come from the plan's `income.next_payday` and schedule, counted backwards too when `as_of` is earlier; with no income in the plan, nothing accrues.
+- **Balance**: `balance ÷ price on as_of` shares, plus `per_paycheck ÷ that day's price` for each payday in the plan (`plan.json` income) after `as_of`, up to today. Paydays come from the plan's `income.next_payday` and schedule, counted backwards too when `as_of` is earlier; with no income in the plan, nothing accrues.
 - **Distributions**: a fund that pays a dividend or capital gain buys more shares if you reinvest, and the app can't see that. Update `shares` from your statement (each December for most funds).
 - A holding with no price yet shows "—" and counts as $0 until one arrives. A source that's down leaves the last prices in place.
 

@@ -62,6 +62,17 @@ def test_data_survives_app_restart(data_dir):
         assert c.get("/api/plan").json()["buffer"] == 150
 
 
+def test_by_default_data_lives_in_the_home_folder_outside_the_repo_and_only_the_owner_can_open_it(tmp_path, monkeypatch):
+    from finance import config
+
+    monkeypatch.delenv("FINANCE_DATA_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = config.data_dir()
+    assert path == tmp_path / ".local/share/finance-tracker"
+    assert config.ROOT not in path.parents
+    assert path.stat().st_mode & 0o777 == 0o700
+
+
 def test_food_last_week_from_the_spending_endpoint(app):
     s = app.get("/api/spending?period=last_week").json()
     assert (s["start"], s["end"]) == ("2026-10-19", "2026-10-25")
@@ -338,8 +349,11 @@ def test_requests_for_other_host_names_are_refused(client):
 def test_pages_forbid_outside_scripts_and_api_answers_are_never_cached(client):
     page = client.get("/")
     assert page.status_code == 200
-    csp = page.headers["content-security-policy"]
-    assert "script-src 'self'" in csp and "frame-ancestors 'none'" in csp
+    csp = dict(d.strip().split(" ", 1) for d in page.headers["content-security-policy"].split(";"))
+    # The one outside script is Plaid Link, for adding a bank from the Money screen; it opens in Plaid's own frame.
+    assert csp["script-src"] == "'self' https://cdn.plaid.com/link/v2/stable/link-initialize.js"
+    assert csp["frame-src"] == "https://cdn.plaid.com"
+    assert csp["default-src"] == "'self'" and csp["frame-ancestors"] == "'none'"
     assert page.headers["x-content-type-options"] == "nosniff"
     assert page.headers["referrer-policy"] == "no-referrer"
     api = client.get("/api/accounts")

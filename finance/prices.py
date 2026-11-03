@@ -1,4 +1,4 @@
-"""Daily prices for the holdings in data/manual.json and the brokerage's tickers: funds and ETFs from Yahoo
+"""Daily prices for the holdings in manual.json and the brokerage's tickers: funds and ETFs from Yahoo
 Finance, TSP funds from tsp.gov.
 
 Neither needs a key. Yahoo gets a symbol and a date range; tsp.gov's download is the same for everyone.

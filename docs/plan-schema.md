@@ -1,4 +1,4 @@
-# `data/plan.json`
+# `plan.json`
 
 The owner's plan: pay, bills, spending targets, buffer, goals. Plain JSON you can edit by hand, from the Plan screen, or with `PUT /api/plan`. The app writes an empty plan on first start and is useful with it; each field you fill in makes a number sharper.
 

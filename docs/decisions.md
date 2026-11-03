@@ -14,7 +14,7 @@ One line each: what was chosen and why.
 
 ## Money
 
-- **Integer cents everywhere inside the app; dollars only in `data/plan.json` and `data/manual.json`** (what a person types). Plaid's floats go through `Decimal` once, at sync. Per-share prices are the exception: stored as published (REAL, at most 4 places), and a value is worked out in `Decimal` and rounded to cents once.
+- **Integer cents everywhere inside the app; dollars only in `plan.json` and `manual.json`** (what a person types). Plaid's floats go through `Decimal` once, at sync. Per-share prices are the exception: stored as published (REAL, at most 4 places), and a value is worked out in `Decimal` and rounded to cents once.
 - **Plaid's sign is kept: positive is money out, negative is money in.** Flipping it in one place and not another is the classic bug; keeping the source's sign avoids that.
 - **Spending excludes income, transfers to own accounts (Plaid's account, savings and investment transfers) and card payments; refunds net in; pending counts.** Otherwise paying the card bill would count every purchase twice. Zelle/Venmo payments to people (`TRANSFER_OUT_FROM_APPS`) count as spending.
 - **Accounts are keyed by institution family + mask** (`bofa:2222`). Merrill and Bank of America share a login and both report CMA-Edge, so it counts once in net worth.
@@ -22,12 +22,12 @@ One line each: what was chosen and why.
 - **Today's allowance = (safe-to-spend pool + spent today) ÷ days to payday, and "left today" = allowance − spent today.** Adding today's spending back makes the allowance what the day started with, so it holds still as you spend instead of shrinking with every purchase. Spent today leaves out payments of plan bills, which the pool already reserved. Rent, plan bills, the card balance and the buffer are set aside first; the allowance covers everything else (food, gas, fun, subscriptions not in the plan).
 - **The bills calendar shows this month and next, from the plan's paydays and bills plus detected recurring charges.** A plan bill counts as paid when a matching payment lands from 7 days before its due date to 5 days after (autopay posts early, a manual payment can run late); a detected charge is paid on the days it was charged and projected forward by its cadence. Two months covers "what's left before payday" without guessing at schedules further out.
 - **Tips are worked out from the owner's own numbers, at most three on Today.** A category's pace tip waits until the 8th of the month, because one early grocery run projects to a wild monthly figure; it shows sooner only when the target is already spent.
-- **Consent is estimated at 12 months for Bank of America** because Plaid reports no expiry date for it; the count restarts when a re-link through the link page succeeds.
+- **Consent is estimated at 12 months for Bank of America** because Plaid reports no expiry date for it; the count restarts when Fix login on the Money screen succeeds.
 - **Card owed includes pending charges** (limit − available when the bank reports both), because that is what the next statement will ask for.
 
 ## Manual investments
 
-- **Accounts Plaid can't link go in `data/manual.json`, edited by Claude or by hand, with no screen.** The owner's fund companies aren't in Plaid, and share counts change a few times a year.
+- **Accounts Plaid can't link go in `manual.json`, edited by Claude or by hand, with no screen.** The owner's fund companies aren't in Plaid, and share counts change a few times a year.
 - **Prices come from Yahoo Finance (funds) and tsp.gov (TSP funds): both keyless.** A paid quote API would add a key for numbers that are public.
 - **Each price source gets its own User-Agent.** Yahoo rate-limits a full browser string; tsp.gov refuses a short one.
 - **A TSP balance turns into shares at its `as_of` price, and `per_paycheck` buys more on each plan payday**, so the value follows the fund between the balances the owner types in.
@@ -63,8 +63,12 @@ One line each: what was chosen and why.
 - **Read-only products only** (`transactions`, `investments`). No code path can move money.
 - **Bound to 127.0.0.1; phone access via `tailscale serve`** (HTTPS inside the tailnet). Never Funnel, never a public port. Inside the container the servers listen on 0.0.0.0, which Docker needs; compose publishes them on the host's 127.0.0.1 only.
 - **Host allowlist** (localhost, 127.0.0.1, `*.ts.net`). A web page that points its own domain at 127.0.0.1 (DNS rebinding) gets a 400 instead of balances. Extra names via `FINANCE_EXTRA_HOSTS`.
-- **CSP `default-src 'self'`, `frame-ancestors 'none'`, `Cache-Control: no-store` on `/api/`.** No outside scripts, no framing, no balances in a browser cache.
+- **CSP `default-src 'self'`, `frame-ancestors 'none'`, `Cache-Control: no-store` on `/api/`.** No framing, no balances in a browser cache. The one outside script is Plaid Link's, allowed by its exact URL (plus frames from `cdn.plaid.com`), and loaded only when you tap Add or Fix login. Plaid already holds this data, so its script in the page adds no new party.
 - **Bank names and merchant strings are untrusted text**: the UI builds the DOM with `textContent` only, never `innerHTML`.
-- **Keys reach the container by name only** (`run.sh` exports them, compose passes them through). Tokens live in `data/items.json` (mode 600, gitignored, not in the image).
-- **Linking runs at `http://localhost:8765`** because Plaid Link in Production refuses other plain-http hosts.
+- **Keys reach the container by name only** (`run.sh` exports them, compose passes them through). Tokens live in `items.json` in the data folder (mode 600, written atomically, not in the image).
+- **Banks are linked, fixed and removed inside the app (Money → Connections), not on a separate page.** Plaid Link in Production accepts plain http only on localhost, so it works at http://localhost:8787 on the computer and at the HTTPS tailnet address on the phone. A separate link server on another port meant a second thing to start and expose.
+- **The browser sees opaque connection ids** (a hash of the item id), link tokens and public tokens, never an access token or Plaid's item id. New Items can only ask for `transactions` or `investments`; anything else is a 400 before Plaid is called.
+- **The write endpoints (`/api/connections…`) can't be sent from another site.** POSTs take JSON only: a cross-site form can't send `application/json`, and a script sending it, or any DELETE, needs a CORS preflight the app never answers, so another site can't link or remove a bank through a browser on this computer. On the phone the lock cookie is `SameSite=Strict` as well.
+- **Removing a bank calls Plaid's `/item/remove` first and forgets it here only if that worked** (or Plaid says the Item is already gone), under the sync lock so a running sync can't write it back. An account another Item also reports stays and is handed to that Item.
+- **The data lives in `~/.local/share/finance-tracker`, outside the repo** (`FINANCE_DATA_DIR` inside the app, `FINANCE_DATA` for compose). A gitignore line can be lost or overridden; a folder outside the repo can't be committed at all. `run.sh` creates it mode 700 before Docker would create it as root, and moves an old `./data` there once.
 - **No in-app chat with the Anthropic API.** It would send financial data to a third party. "Ask Claude" copies a text snapshot to the clipboard instead; the owner decides where to paste it.

@@ -954,7 +954,7 @@ async function screenMoney() {
     h('p', { class: 'hero-sub' }, `${money0(nw.assets_cents)} in accounts − ${money0(nw.liabilities_cents)} owed on cards`));
 
   const accounts = card('Accounts', h('ul', { class: 'rows' }, d.accounts.map((a) => {
-    const title = a.mask ? `${a.name} …${a.mask}` : a.name;  // accounts typed into data/manual.json have no mask
+    const title = a.mask ? `${a.name} …${a.mask}` : a.name;  // accounts typed into manual.json have no mask
     if (a.type === 'credit') {
       const used = a.limit_cents ? Math.round((100 * a.owed_cents) / a.limit_cents) : null;
       return row(title, `${a.institution} · credit card`, money(a.owed_cents),
@@ -973,16 +973,87 @@ async function screenMoney() {
         h('p', { class: 'hero-sub' }, `Cash on hand ${money0(r.cash_cents)} at a typical ${money0(r.typical_monthly_cents)} a month of spending.`)]
       : h('p', { class: 'empty' }, 'Needs a full month of spending history.'));
 
-  const links = card('Connections', h('ul', { class: 'rows' }, st.items.map((it) => {
-    const ok = it.status === 'ok';
-    const c = it.consent;
-    return row(it.institution,
-      [ok ? statusLine('good', 'Connected') : statusLine('critical', it.error_code || it.status),
-        it.last_synced_at ? `synced ${ago(it.last_synced_at)}` : 'never synced',
-        c && `re-link by ${fmtShort(c.expires)} (${c.estimated ? 'about ' : ''}${c.days_left} ${c.days_left === 1 ? 'day' : 'days'} left)`],
-      null);
-  })), h('p', { class: 'sub' }, 'To fix a login or re-link, run ./run.sh link on the computer.'));
+  const links = card('Connections',
+    st.items.length ? h('ul', { class: 'rows' }, st.items.map(connectionRow)) : h('p', { class: 'empty' }, 'Nothing linked yet.'),
+    h('div', { class: 'conn-actions' },
+      h('button', { class: 'btn small', type: 'button', onclick: (e) => openLink({ kind: 'transactions' }, e.currentTarget) }, 'Add bank or card'),
+      h('button', { class: 'btn small', type: 'button', onclick: (e) => openLink({ kind: 'investments' }, e.currentTarget) }, 'Add brokerage')),
+    h('p', { class: 'sub' }, 'Read-only through Plaid: the app can see balances and transactions, never move money.'));
   return [hero, accounts, runway, links];
+}
+
+function connectionRow(it) {
+  const ok = it.status === 'ok';
+  const c = it.consent;
+  const li = row(it.institution,
+    [ok ? statusLine('good', 'Connected') : statusLine('critical', it.error_code || it.status),
+      it.last_synced_at ? `synced ${ago(it.last_synced_at)}` : 'never synced',
+      c && `re-link by ${fmtShort(c.expires)} (${c.estimated ? 'about ' : ''}${c.days_left} ${c.days_left === 1 ? 'day' : 'days'} left)`],
+    null);
+  // A broken login or a consent near its end both mean going through the bank's sign-in again.
+  const fix = !ok || (c && c.days_left <= 30);
+  li.querySelector('.row-main').append(h('div', { class: 'conn-actions' },
+    h('button', { class: fix ? 'btn small primary' : 'btn small', type: 'button', onclick: (e) => openLink({ id: it.id }, e.currentTarget) },
+      fix ? 'Fix login' : 'Change accounts'),
+    h('button', { class: 'link-btn', type: 'button', onclick: (e) => removeConnection(it, e.currentTarget) }, 'Remove')));
+  return li;
+}
+
+// Plaid Link's script, fetched the first time a bank is added or fixed. The page's CSP allows this one file.
+let plaidScript;
+function loadPlaid() {
+  plaidScript = plaidScript || new Promise((resolve, reject) => {
+    const s = h('script', { src: 'https://cdn.plaid.com/link/v2/stable/link-initialize.js' });
+    s.onload = () => resolve(window.Plaid);
+    s.onerror = () => { plaidScript = null; s.remove(); reject(new Error('could not load Plaid. Check the connection and try again')); };
+    document.head.append(s);
+  });
+  return plaidScript;
+}
+
+// Add a bank ({kind}) or fix one ({id}: Plaid's update mode, which also lets you change the accounts it shares).
+async function openLink(body, btn) {
+  btn.disabled = true;
+  try {
+    const [t, Plaid] = await Promise.all([api('/api/connections/link_token', { method: 'POST', body: JSON.stringify(body) }), loadPlaid()]);
+    const link = Plaid.create({
+      token: t.link_token,
+      onSuccess: async (publicToken, meta) => {
+        link.destroy();
+        toast(body.id ? 'Saving…' : 'Linking and syncing. This can take a minute…');
+        try {
+          const r = body.id
+            ? await api(`/api/connections/${encodeURIComponent(body.id)}/renewed`, { method: 'POST', body: '{}' })
+            : await api('/api/connections', { method: 'POST', body: JSON.stringify({ public_token: publicToken, institution: meta.institution && meta.institution.name }) });
+          toast(r.message);
+        } catch (e) {
+          toast('Could not save: ' + e.message);
+        }
+        render();
+      },
+      onExit: (err) => {
+        link.destroy();
+        btn.disabled = false;
+        if (err) toast('Plaid closed: ' + (err.display_message || err.error_message || err.error_code));
+      },
+    });
+    link.open();
+  } catch (e) {
+    btn.disabled = false;
+    toast('Could not open Plaid: ' + e.message);
+  }
+}
+
+async function removeConnection(it, btn) {
+  if (!confirm(`Remove ${it.institution}?\n\nPlaid stops sharing its data, and its accounts, transactions and holdings are deleted from this app. You can link it again later.`)) return;
+  btn.disabled = true;
+  try {
+    toast((await api(`/api/connections/${encodeURIComponent(it.id)}`, { method: 'DELETE' })).message);
+    render();
+  } catch (e) {
+    btn.disabled = false;
+    toast('Could not remove: ' + e.message);
+  }
 }
 
 // --- Investing

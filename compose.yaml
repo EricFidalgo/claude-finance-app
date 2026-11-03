@@ -10,13 +10,15 @@ services:
     restart: unless-stopped
     # Published on the host's loopback only. Phone access goes through `tailscale serve`.
     ports:
-      - "127.0.0.1:8787:8787"  # the app
-      - "127.0.0.1:8765:8765"  # Plaid Link page, only while `./run.sh link` runs
+      - "127.0.0.1:8787:8787"
+    # The owner's data, kept outside the repo (run.sh creates the folder and moves an old ./data there).
     volumes:
-      - ./data:/app/data
+      - ${FINANCE_DATA:-${HOME}/.local/share/finance-tracker}:/app/data
     # Values pass through by name from the shell that runs compose (run.sh exports them).
     environment:
       - PLAID_CLIENT_ID
       - PLAID_SECRET
       - PLAID_SANDBOX_SECRET
+      - FINANCE_PLAID_ENV
+      - FINANCE_DATA_DIR=/app/data
       - TZ=${TZ:-America/New_York}
