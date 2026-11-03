@@ -77,6 +77,18 @@ CREATE TABLE IF NOT EXISTS holdings (
   updated_at TEXT,
   PRIMARY KEY (account_key, security_id)
 );
+-- Daily prices for the holdings in data/manual.json, which no bank reports.
+CREATE TABLE IF NOT EXISTS prices (
+  symbol TEXT NOT NULL,
+  date TEXT NOT NULL,
+  price REAL NOT NULL,
+  PRIMARY KEY (symbol, date)
+);
+-- Alerts the owner removed from the attention list, by the id money.alerts gives them.
+CREATE TABLE IF NOT EXISTS dismissed_alerts (
+  id TEXT PRIMARY KEY,
+  dismissed_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sync_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   at TEXT NOT NULL,

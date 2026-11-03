@@ -1,4 +1,8 @@
-"""A fake Plaid that answers the endpoints sync uses, shaped like Plaid's real responses."""
+"""A fake Plaid that answers the endpoints sync uses, shaped like Plaid's real responses, and a fake price feed."""
+import json
+from datetime import datetime
+from urllib.error import URLError
+
 from finance.plaid import PlaidError
 
 BOA = "ins_127989"
@@ -101,3 +105,30 @@ class FakeBank:
 
     def post(self, path, body):
         return self.fakes[body["access_token"]].post(path, body)
+
+
+class FakeFeed:
+    """The price sources as one `get(url, user_agent)`: Yahoo's chart JSON for each symbol in `closes`, tsp.gov's CSV
+    for the columns in `tsp`. Both map a name to [(ISO date, price)]. Set `down` to make every request fail."""
+
+    def __init__(self, closes=None, tsp=None):
+        self.closes = dict(closes or {})
+        self.tsp = dict(tsp or {})
+        self.down = False
+
+    def __call__(self, url, user_agent):
+        if self.down:
+            raise URLError("fake outage")
+        if "tsp.gov" in url:
+            dates = sorted({d for rows in self.tsp.values() for d, _ in rows}, reverse=True)
+            by = {col: dict(rows) for col, rows in self.tsp.items()}
+            lines = [",".join(["Date", *by])] + [",".join([d, *(str(by[c].get(d, "")) for c in by)]) for d in dates]
+            return "\n".join(lines).encode()
+        symbol = url.split("/chart/")[1].split("?")[0]
+        rows = self.closes.get(symbol)
+        if rows is None:
+            return json.dumps({"chart": {"result": None, "error": {"description": "No data found"}}}).encode()
+        stamps = [int(datetime.fromisoformat(f"{d}T13:30:00+00:00").timestamp()) for d, _ in rows]  # 9:30 New York
+        return json.dumps({"chart": {"result": [{"meta": {"symbol": symbol, "gmtoffset": -14400}, "timestamp": stamps,
+                                                 "indicators": {"quote": [{"close": [p for _, p in rows]}]}}],
+                                     "error": None}}).encode()

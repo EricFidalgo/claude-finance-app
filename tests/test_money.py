@@ -1,11 +1,14 @@
 from datetime import date
 
+import pytest
+
 from finance import money
 
 
 def t(amount_cents, day, category="FOOD_AND_DRINK", merchant="Cafe", detailed=None, pending=False,
-      account_key="bofa:1111", name=None, tid=None):
+      account_key="bofa:1111", name=None, tid=None, authorized=None):
     return {"transaction_id": tid or f"{merchant}-{day}-{amount_cents}", "amount_cents": amount_cents, "date": day,
+            "authorized_date": authorized,
             "merchant_name": merchant, "name": name or merchant, "category": category,
             "category_detailed": detailed or f"{category}_OTHER", "pending": pending, "account_key": account_key}
 
@@ -126,7 +129,7 @@ from finance.plan import EMPTY_PLAN  # noqa: E402
 
 
 def income(schedule="biweekly", next_payday="2026-11-06", **kw):
-    return {"name": "Pay", "amount": 2400, "schedule": schedule, "next_payday": next_payday, **kw}
+    return {"amount": 2400, "schedule": schedule, "next_payday": next_payday, **kw}
 
 
 def bill(name, amount, due_day, account="1111", **kw):
@@ -143,6 +146,26 @@ def test_next_payday_rolls_the_anchor_forward_by_schedule():
     assert money.next_payday(income("monthly", "2026-01-31"), date(2026, 11, 1)) == date(2026, 11, 30)
     assert money.next_payday(income("semimonthly", "2026-10-15"), today) == date(2026, 10, 31)
     assert money.next_payday(income("semimonthly", "2026-10-15", days=[1, 15]), today) == date(2026, 11, 1)
+
+
+def test_pay_period_runs_from_the_last_payday_to_today_against_the_same_days_of_the_one_before():
+    today = date(2026, 10, 29)
+    assert money.period_range("pay_period", today, income("biweekly", "2026-11-06")) == (
+        date(2026, 10, 23), today, date(2026, 10, 9), date(2026, 10, 15))
+    assert money.period_range("pay_period", today, income("semimonthly", "2026-10-15")) == (
+        date(2026, 10, 15), today, date(2026, 9, 30), date(2026, 10, 14))
+    assert money.period_range("pay_period", date(2026, 11, 1), income("monthly", "2026-01-31")) == (
+        date(2026, 10, 31), date(2026, 11, 1), date(2026, 9, 30), date(2026, 10, 1))
+    assert money.period_range("pay_period", today, income("weekly", "2026-10-29"))[:2] == (today, today)  # paid today
+    with pytest.raises(ValueError):
+        money.period_range("pay_period", today)  # no pay schedule in the plan
+
+
+def test_a_chosen_date_range_compares_with_as_many_days_just_before_it():
+    s = money.spend_summary([t(1000, "2026-10-12"), t(400, "2026-10-05"), t(9900, "2026-10-20")], "custom",
+                            date(2026, 10, 29), start=date(2026, 10, 10), end=date(2026, 10, 19))
+    assert (s["start"], s["end"], s["total_cents"]) == ("2026-10-10", "2026-10-19", 1000)
+    assert s["previous"] == {"start": "2026-09-30", "end": "2026-10-09", "total_cents": 400}
 
 
 def test_safe_to_spend_with_an_empty_plan_asks_for_pay_schedule_and_bills():
@@ -178,6 +201,138 @@ def test_safe_to_spend_skips_a_bill_already_paid_this_cycle_and_can_go_negative(
     assert [b["name"] for b in s["bills"]] == ["Rent"]
     assert s["available_cents"] == 140000 - 120000 - 35000
     assert s["per_day_cents"] == -1875
+
+
+def test_todays_allowance_holds_steady_through_the_day_and_counts_down_what_is_left():
+    plan = {**EMPTY_PLAN, "income": income("biweekly", "2026-11-06"), "buffer": 100, "bills": [bill("Phone", 50, 1)]}
+    txns = [t(3000, "2026-10-29", merchant="Cafe"),                                  # spent today, on the card
+            t(5000, "2026-10-29", "GENERAL_SERVICES", "Phone"),                       # the Phone bill, already set aside
+            t(20000, "2026-10-29", "LOAN_PAYMENTS", "BoA card", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+            t(9900, "2026-10-28")]                                                    # yesterday's spending
+    s = money.safe_to_spend([CHECKING, CARD], plan, txns, date(2026, 10, 29))
+
+    # now: 1400 checking - 0 bills (Phone paid) - 350 card - 100 buffer = 950 over 8 days
+    # the day started with today's 30 of spending still in hand: (950 + 30) / 8 = 122.50 a day; 92.50 left today
+    assert s["available_cents"] == 95000
+    assert s["spent_today_cents"] == 3000
+    assert s["allowance_cents"] == 12250
+    assert s["left_today_cents"] == 9250
+    # Today's "spent today" tile counts the Phone bill as spending; this says why the allowance's 30 is less
+    assert s["bills_paid_today_cents"] == 5000
+
+
+def test_spent_today_counts_a_purchase_that_only_looks_like_a_plan_bill_not_due_this_week():
+    plan = {**EMPTY_PLAN, "income": income("biweekly", "2026-11-06"), "buffer": 0,
+            "bills": [bill("Apple iCloud", 2.99, 20, fixed=False)]}    # varies, so any amount matches; due Nov 20
+    txns = [t(4500, "2026-10-29", "GENERAL_MERCHANDISE", "Apple")]      # an Apple purchase, three weeks early
+    s = money.safe_to_spend([CHECKING, CARD], plan, txns, date(2026, 10, 29))
+
+    assert s["spent_today_cents"] == 4500
+
+
+def test_pace_tips_wait_for_a_week_of_the_month_unless_the_target_is_already_gone():
+    plan = {**EMPTY_PLAN, "monthly_spend": {"FOOD_AND_DRINK": 300, "TRANSPORTATION": 50}}
+    txns = [t(6000, "2026-10-01"), t(6000, "2026-10-01", "TRANSPORTATION", "Shell")]
+    tips = money.tips([CHECKING], [], plan, txns, [], None, date(2026, 10, 1))
+
+    # food: one $60 grocery run on the 1st says nothing about the month (it would "pace" to $1,860)
+    # transport: $60 against $50 is over no matter the day
+    assert [x["title"] for x in tips if x["kind"] == "pace"] == ["Transportation is on pace for $1,860 this month"]
+
+
+def test_month_events_mark_a_plan_bill_paid_a_few_days_late():
+    plan = {**EMPTY_PLAN, "bills": [bill("Rent", 1200, 1)]}
+    txns = [t(120000, "2026-10-03", "RENT_AND_UTILITIES", "Rent")]
+    events = money.month_events(plan, [], txns, date(2026, 10, 1), date(2026, 11, 1), date(2026, 10, 29))
+
+    assert [(e["date"], e["paid"]) for e in events] == [("2026-10-01", True)]
+
+
+def test_month_events_mark_paydays_plan_bills_and_detected_charges_across_the_month():
+    plan = {**EMPTY_PLAN, "income": income("biweekly", "2026-11-06", amount=2000),
+            "bills": [bill("Rent", 1200, 1), bill("Phone", 50, 20)]}
+    netflix = monthly([1599] * 4, "Netflix")                    # charged the 12th, July through October
+    txns = netflix + [t(5000, "2026-10-19", "GENERAL_SERVICES", "Phone")]
+    recurring = money.detect_recurring(txns, date(2026, 10, 29))
+    events = money.month_events(plan, recurring, txns, date(2026, 10, 1), date(2026, 12, 1), date(2026, 10, 29))
+
+    assert [(e["date"], e["kind"], e["name"], e["amount_cents"], e["paid"]) for e in events] == [
+        ("2026-10-01", "bill", "Rent", 120000, False),       # no payment seen: it stays unpaid, not guessed
+        ("2026-10-09", "payday", "Payday", 200000, False),      # paydays run back from the anchor too
+        ("2026-10-12", "bill", "Netflix", 1599, True),        # a detected charge that already happened
+        ("2026-10-20", "bill", "Phone", 5000, True),          # paid the day before it was due
+        ("2026-10-23", "payday", "Payday", 200000, False),
+        ("2026-11-01", "bill", "Rent", 120000, False),
+        ("2026-11-06", "payday", "Payday", 200000, False),
+        ("2026-11-12", "bill", "Netflix", 1599, False),       # projected from its cadence
+        ("2026-11-20", "bill", "Phone", 5000, False),
+        ("2026-11-20", "payday", "Payday", 200000, False),
+    ]
+
+
+def test_tips_flag_a_budget_on_pace_to_overrun_a_card_over_30_percent_thin_cash_and_unplanned_subscriptions():
+    plan = {**EMPTY_PLAN, "monthly_spend": {"FOOD_AND_DRINK": 300, "TRANSPORTATION": 200},
+            "bills": [bill("Rent", 1200, 1)]}
+    maxed = a("9999", "credit", "credit card", current=90000, available=100000, limit=200000)
+    txns = [t(14000, "2026-10-03"), t(10000, "2026-10-14"), t(3000, "2026-10-14", "TRANSPORTATION", "Shell"),
+            t(99000, "2026-09-20")]                                              # last month's food doesn't count
+    subs = monthly([1599] * 4, "Netflix") + monthly([1099] * 4, "Spotify", start=(2026, 6, 20)) + \
+        monthly([120000] * 4, "Rent", "RENT_AND_UTILITIES", start=(2026, 7, 1))  # rent is in the plan already
+    recurring = money.detect_recurring(subs, date(2026, 10, 15))
+    tips = money.tips([CHECKING, maxed], [], plan, txns, recurring, 200000, date(2026, 10, 15))
+
+    # food: 240 by the 15th of 31 days is on pace for 496; 60 left over the 16 days to go is 3.75 a day
+    # card: 1000 of 2000 used; 30% is 600. cash: 1400 checking - 1000 card = 400, 0.2 of a 2000 month
+    assert [(x["kind"], x["title"], x["detail"]) for x in tips] == [
+        ("pace", "Food and drink is on pace for $496 this month",
+         "Your target is $300 and $240 is spent. $3.75 a day for the rest of October keeps it on target."),
+        ("card", "Card …9999 is 50% used",
+         "Paying it under 30% ($600) before the statement closes helps your credit score."),
+        ("runway", "Cash covers 0.2 months of spending",
+         "Checking and brokerage cash, less the card, against a typical $2,000 month. Three months is a common cushion."),
+        ("subscriptions", "2 repeat charges outside your plan: $26.98 a month",
+         "Netflix, Spotify. Add the ones you keep to the plan so safe-to-spend sets them aside."),
+    ]
+
+
+def test_portfolio_history_values_todays_shares_at_past_prices_and_holds_cash_and_unpriced_funds_flat():
+    holdings = [{**h("VTI", "etf", 220000), "security_id": "s-vti", "quantity": 10},
+                {**h("BND", "etf", 7200), "security_id": "s-bnd", "quantity": 1},
+                {**h(None, "mutual fund", 21000, name="TSP C Fund"), "security_id": "manual:TSP:C", "quantity": 2.0},
+                {**h("TTTXX", "mutual fund", 100000, cash=True), "security_id": "s-mm", "quantity": 1000},
+                {**h("MYST", "mutual fund", 50000, name="Mystery Fund"), "security_id": "s-myst", "quantity": 5}]
+    prices = {"VTI": [("2026-09-30", 190.0), ("2026-10-01", 200.0), ("2026-10-02", 210.0), ("2026-10-05", 220.0)],
+              "BND": [("2026-10-02", 70.0), ("2026-10-05", 72.0)],      # no price on the 1st, so the chart starts later
+              "TSP:C": [("2026-09-30", 100.0), ("2026-10-02", 110.0), ("2026-10-05", 105.0)]}
+    hist = money.portfolio_history(holdings, prices, date(2026, 10, 1), date(2026, 10, 5))
+
+    # flat: 1,000 cash + 500 Mystery Fund. 10/2: 10×210 + 1×70 + 2×110 = 2,390. 10/5: 10×220 + 72 + 2×105 = 2,482
+    assert hist["points"] == [{"date": "2026-10-02", "total_cents": 389000},
+                              {"date": "2026-10-05", "total_cents": 398200}]
+    assert hist["flat_cents"] == 150000
+    assert hist["unpriced"] == ["Mystery Fund"]
+
+
+def test_portfolio_history_ends_on_today_at_the_value_shown_as_the_total():
+    holdings = [{**h("VTI", "etf", 230000), "security_id": "s-vti", "quantity": 10},     # the bank's live value
+                {**h("TTTXX", "mutual fund", 100000, cash=True), "security_id": "s-mm", "quantity": 1000}]
+    prices = {"VTI": [("2026-10-01", 200.0), ("2026-10-02", 210.0)]}
+    hist = money.portfolio_history(holdings, prices, date(2026, 10, 1), date(2026, 10, 3))
+
+    # yesterday's close is the last price; today's point is the 3,300 the Investing total shows
+    assert hist["points"] == [{"date": "2026-10-01", "total_cents": 300000},
+                              {"date": "2026-10-02", "total_cents": 310000},
+                              {"date": "2026-10-03", "total_cents": 330000}]
+
+
+def test_yearly_contributions_are_each_paychecks_auto_investment_times_paydays_a_year():
+    doc = {"version": 1, "accounts": [
+        {"name": "TSP", "holdings": [{"symbol": "TSP:C", "balance": 8200, "as_of": "2026-10-27", "per_paycheck": 250},
+                                     {"symbol": "TSP:S", "balance": 100, "as_of": "2026-10-27", "per_paycheck": 50}]},
+        {"name": "IRA", "holdings": [{"symbol": "VFIAX", "shares": 4}]}]}
+    assert money.yearly_contributions(doc, income("biweekly")) == 26 * 30000
+    assert money.yearly_contributions(doc, income("semimonthly")) == 24 * 30000
+    assert money.yearly_contributions(doc, None) == 0       # no pay schedule, no paydays to count
 
 
 # --- recurring charges
@@ -237,10 +392,18 @@ def test_detect_recurring_follows_a_subscription_through_a_price_rise():
         (1799, 4, "2026-10-12", "2026-11-12", True)
 
 
-def test_detect_recurring_accepts_a_single_charge_the_bank_marks_recurring():
-    txns = [t(499, "2026-10-05", "ENTERTAINMENT", "Apple.com/bill", name="APPLE.COM/BILL RECURRING 866-712-7753")]
-    [r] = money.detect_recurring(txns, date(2026, 10, 29))
-    assert (r["cadence"], r["next_due"], r["count"]) == ("monthly", "2026-11-05", 1)
+def test_detect_recurring_needs_repeat_charges_because_the_banks_recurring_label_only_means_card_on_file():
+    label = "CHECKCARD STREAMLY.COM RECURRING"
+    one_offs = [t(150, "2026-08-04", "ENTERTAINMENT", "Streamly", name=label),
+                t(650, "2026-10-13", "ENTERTAINMENT", "Streamly", name=label),
+                t(2300, "2026-10-28", "ENTERTAINMENT", "Streamly", name=label),
+                t(9500, "2026-08-27", "RENT_AND_UTILITIES", "Lakeside Water", name="Lakeside Wat RECURRING"),
+                t(3, "2026-10-02", "GENERAL_SERVICES", "Hosting Co", name="HOSTING 12AB RECURRING")]
+    assert money.detect_recurring(one_offs, date(2026, 11, 1)) == []
+
+    repeats = monthly([1599, 1599], "Streamly", start=(2026, 9, 12))
+    [s] = money.detect_recurring(repeats, date(2026, 11, 1))
+    assert (s["merchant"], s["count"], s["next_due"]) == ("Streamly", 2, "2026-11-12")
 
 
 def test_detect_recurring_drops_a_series_that_stopped_charging():
@@ -395,3 +558,110 @@ def test_alerts_warn_when_consent_has_thirty_days_or_fewer():
     [x] = money.alerts([soon], {"bills": []}, [], NOW)
     assert (x["level"], x["kind"]) == ("warn", "consent_expiring") and "22 days" in x["title"]
     assert money.alerts([item_row()], {"bills": []}, [], NOW) == []
+
+
+def alert_id(items=(), bills=(), unusual=(), now=NOW):
+    [x] = money.alerts(list(items), {"bills": list(bills)}, list(unusual), now)
+    return x["id"]
+
+
+def test_an_alert_id_stays_the_same_while_the_problem_lasts_and_changes_when_it_happens_again():
+    # A login that stays broken keeps its id; one that recovers and breaks again is a new alert.
+    broken = item_row(status="login_required")
+    assert alert_id([broken]) == alert_id([{**broken, "last_attempt_at": "2026-10-29T15:00:00+00:00"}])
+    assert alert_id([broken]) != alert_id([{**broken, "last_synced_at": "2026-10-29T15:00:00+00:00"}])
+
+    # Each month's bill is its own alert, and a warning that turns urgent shows again.
+    rent = {"name": "Rent", "due": "2026-11-01", "amount_cents": 150000, "covered": False}
+    assert alert_id(bills=[rent]) != alert_id(bills=[{**rent, "due": "2026-12-01"}])
+    soon = item_row(consent_expires_at="2026-11-20T00:00:00Z")
+    later = "2026-11-15T16:00:00+00:00"
+    assert alert_id([soon]) != alert_id([{**soon, "last_synced_at": later}], now=later)
+
+
+def test_a_flagged_charge_keeps_its_alert_id_when_it_posts_under_a_new_transaction_id_and_date():
+    pending = {"kind": "large", "merchant": "Diner", "amount_cents": 4250, "date": "2026-10-26",
+               "authorized_date": "2026-10-25", "detail": "x", "transaction_id": "pending-1"}
+    posted = {**pending, "date": "2026-10-27", "transaction_id": "posted-1"}
+    assert alert_id(unusual=[pending]) == alert_id(unusual=[posted])
+    assert alert_id(unusual=[pending]) != alert_id(unusual=[{**pending, "authorized_date": "2026-11-25"}])
+    assert money.unusual_charges([t(250000, "2026-10-26", authorized="2026-10-25", merchant="Rare Shop"),
+                                  t(100, "2026-10-01"), t(100, "2026-10-02")],
+                                 date(2026, 10, 29))[0]["authorized_date"] == "2026-10-25"
+
+
+def test_identical_flagged_charges_are_dismissed_one_at_a_time():
+    twin = {"kind": "duplicate", "merchant": "Diner", "amount_cents": 4250, "date": "2026-10-26",
+            "authorized_date": None, "detail": "x", "transaction_id": "a"}
+    ids = [a["id"] for a in money.alerts([], {"bills": []}, [twin, {**twin, "transaction_id": "b"}], NOW)]
+    assert len(set(ids)) == 2
+
+    # The same charge flagged for a different reason is a different alert.
+    assert alert_id(unusual=[twin]) != alert_id(unusual=[{**twin, "kind": "large"}])
+
+
+def test_an_uncovered_bill_shows_again_when_its_amount_goes_up():
+    rent = {"name": "Rent", "due": "2026-11-01", "amount_cents": 150000, "covered": False}
+    assert alert_id(bills=[rent]) != alert_id(bills=[{**rent, "amount_cents": 160000}])
+
+
+def test_an_alert_id_does_not_carry_plaid_identifiers_to_the_browser():
+    assert "secretish" not in alert_id([item_row(status="login_required", item_id="item-secretish")])
+
+
+# --- manually entered holdings
+
+
+def test_manual_fund_is_shares_times_the_latest_price_and_its_account_counts_in_net_worth():
+    doc = {"version": 1, "accounts": [{"name": "Fidelity", "holdings": [{"symbol": "FSPSX", "shares": 123.45}]}]}
+    prices = {"FSPSX": [("2026-10-28", 17.93), ("2026-10-29", 18.02)]}
+    accounts, holdings = money.manual_holdings(doc, prices, None, date(2026, 10, 30))
+
+    # 123.45 shares × $18.02 = $2,224.569
+    assert [(h["ticker"], h["quantity"], h["value_cents"], h["updated_at"]) for h in holdings] == \
+        [("FSPSX", 123.45, 222457, "2026-10-29")]
+    assert [(a["account_key"], a["name"], a["type"], a["mask"], a["current_cents"]) for a in accounts] == \
+        [("manual:fidelity", "Fidelity", "investment", None, 222457)]
+    assert money.net_worth(accounts)["net_cents"] == 222457
+    assert money.bucket_of(holdings[0]) == "fund"
+
+
+def test_manual_tsp_balance_buys_shares_each_payday_since_it_was_entered():
+    tsp = {"symbol": "TSP:C", "name": "TSP C Fund", "balance": 1250.00, "as_of": "2026-10-30", "per_paycheck": 300.00}
+    doc = {"version": 1, "accounts": [{"name": "TSP", "holdings": [tsp]}]}
+    prices = {"TSP:C": [("2026-10-29", 125.0), ("2026-11-06", 120.0), ("2026-11-19", 150.0), ("2026-11-21", 152.0)]}
+    pay = {"amount": 2000, "schedule": "biweekly", "next_payday": "2026-11-06"}
+
+    # $1250 ÷ $125 (10-29, the last price on or before as_of) = 10 shares; payday 11-06 buys $300 ÷ $120 = 2.5;
+    # payday 11-20 has no price yet, so $300 ÷ $150 (11-19) = 2. 14.5 shares × $152 (latest) = $2,204.
+    _, [h] = money.manual_holdings(doc, prices, pay, date(2026, 11, 21))
+    assert (h["ticker"], h["name"], h["quantity"], h["value_cents"]) == (None, "TSP C Fund", 14.5, 220400)
+
+    # No income in the plan means no paydays: the balance alone, 10 shares × $152.
+    _, [h] = money.manual_holdings(doc, prices, None, date(2026, 11, 21))
+    assert h["value_cents"] == 152000
+
+
+def test_manual_tsp_counts_the_paydays_before_the_plans_next_payday_too():
+    tsp = {"symbol": "TSP:C", "balance": 1250.00, "as_of": "2026-10-30", "per_paycheck": 300.00}
+    doc = {"version": 1, "accounts": [{"name": "TSP", "holdings": [tsp]}]}
+    prices = {"TSP:C": [("2026-10-29", 125.0), ("2026-11-06", 120.0), ("2026-11-20", 150.0), ("2026-12-04", 100.0),
+                        ("2026-12-09", 160.0)]}
+    pay = {"amount": 2000, "schedule": "biweekly", "next_payday": "2026-12-04"}  # moved on after 11-06 and 11-20
+
+    # 10 shares on 10-30, then paydays 11-06 (+2.5 at $120), 11-20 (+2 at $150), 12-04 (+3 at $100) = 17.5 × $160
+    _, [h] = money.manual_holdings(doc, prices, pay, date(2026, 12, 10))
+    assert h["value_cents"] == 280000
+
+
+def test_manual_holding_without_a_price_yet_has_no_value_and_adds_nothing():
+    doc = {"version": 1, "accounts": [
+        {"name": "Funds", "holdings": [{"symbol": "FSPSX", "shares": 100}, {"symbol": "VTSAX", "shares": 50}]},
+        {"name": "TSP", "holdings": [{"symbol": "TSP:C", "balance": 1000, "as_of": "2026-10-30"}]}]}
+    accounts, holdings = money.manual_holdings(doc, {"FSPSX": [("2026-10-29", 18.02)]}, None, date(2026, 10, 30))
+
+    assert [(h["security_id"], h["quantity"], h["value_cents"], h["updated_at"]) for h in holdings] == [
+        ("manual:FSPSX", 100.0, 180200, "2026-10-29"), ("manual:VTSAX", 50.0, None, None),
+        ("manual:TSP:C", None, None, None)]
+    assert [(a["current_cents"], a["updated_at"]) for a in accounts] == [(180200, "2026-10-29"), (0, None)]
+    assert money.allocation(holdings[1:])["total_cents"] == 0

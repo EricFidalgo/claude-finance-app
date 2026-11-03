@@ -23,6 +23,10 @@ def plan_path() -> Path:
     return data_dir() / "plan.json"
 
 
+def manual_path() -> Path:
+    return data_dir() / "manual.json"
+
+
 def allowed_hosts() -> list:
     """Host names the app answers to: this machine and the tailnet (tailscale serve). Anything else is refused,
     so a web page that points its own domain at 127.0.0.1 (DNS rebinding) cannot read the API."""

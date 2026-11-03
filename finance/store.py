@@ -44,6 +44,18 @@ def items(conn):
     return [{**dict(r), "products": json.loads(r["products"])} for r in rows]
 
 
+def dismissed_alerts(conn):
+    return {r["id"] for r in conn.execute("SELECT id FROM dismissed_alerts")}
+
+
+def dismiss_alert(conn, alert_id, at):
+    conn.execute("INSERT OR IGNORE INTO dismissed_alerts (id, dismissed_at) VALUES (?, ?)", (alert_id, at))
+
+
+def restore_alerts(conn):
+    conn.execute("DELETE FROM dismissed_alerts")
+
+
 def holdings(conn):
     rows = conn.execute(
         "SELECT h.account_key, a.name AS account_name, a.mask AS account_mask, h.security_id, s.ticker, s.name, s.type,"
@@ -52,3 +64,11 @@ def holdings(conn):
         " ORDER BY h.value_cents DESC"
     ).fetchall()
     return [{**dict(r), "is_cash_equivalent": bool(r["is_cash_equivalent"])} for r in rows]
+
+
+def prices(conn):
+    """Stored daily prices: symbol -> [(ISO date, price)], oldest first."""
+    out = {}
+    for r in conn.execute("SELECT symbol, date, price FROM prices ORDER BY symbol, date"):
+        out.setdefault(r["symbol"], []).append((r["date"], r["price"]))
+    return out

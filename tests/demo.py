@@ -16,10 +16,10 @@ os.environ["FINANCE_SCHEDULER"] = "off"
 
 import uvicorn  # noqa: E402
 
-from finance import db, plan, sync  # noqa: E402
+from finance import db, manual, plan, prices, sync  # noqa: E402
 from finance.plaid import save_item  # noqa: E402
 from finance.web import create_app  # noqa: E402
-from tests.fakes import BOA, MERRILL, FakeBank, FakePlaid, acct, holding, page, security, txn  # noqa: E402
+from tests.fakes import BOA, MERRILL, FakeBank, FakeFeed, FakePlaid, acct, holding, page, security, txn  # noqa: E402
 
 TODAY = date.today()
 
@@ -65,6 +65,7 @@ def _txns():
             add("card", rnd.uniform(20, 60), d, "CVS Pharmacy", "MEDICAL", "MEDICAL_PHARMACIES_AND_SUPPLEMENTS")
         d += timedelta(days=1)
     add("card", 189.00, TODAY - timedelta(days=3), "Electronics Outlet", "GENERAL_MERCHANDISE")
+    add("card", 23.40, TODAY, "Corner Cafe", "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT", pending=True)  # fills Today's gauge
     return out
 
 
@@ -103,12 +104,39 @@ def demo_plan():
             "goals": [{"name": "Emergency fund", "target": 15000, "by": f"{TODAY.year + 1}-06-30"}]}
 
 
+def demo_manual():
+    return {"version": 1, "accounts": [
+        {"name": "Vanguard IRA", "holdings": [{"symbol": "VFIAX", "name": "Vanguard 500 Index Admiral", "shares": 41.2}]},
+        {"name": "TSP", "holdings": [{"symbol": "TSP:C", "name": "TSP C Fund", "balance": 8200,
+                                      "as_of": (TODAY - timedelta(days=3)).isoformat(), "per_paycheck": 250}]}]}
+
+
+def _walk(start, drift, wobble, seed):
+    """A year of made-up weekday closes ending yesterday: a random walk with a slight drift."""
+    rnd, price, out = random.Random(seed), start, []
+    for n in range(prices.HISTORY_DAYS, 0, -1):
+        d = TODAY - timedelta(days=n)
+        if d.weekday() < 5:
+            price *= 1 + drift + rnd.gauss(0, wobble)
+            out.append((d.isoformat(), round(price, 2)))
+    return out
+
+
+def price_feed():
+    return FakeFeed(closes={"VFIAX": _walk(470.0, 0.0006, 0.009, 1), "VTI": _walk(255.0, 0.0006, 0.01, 2),
+                            "BND": _walk(71.0, 0.0001, 0.003, 3)},
+                    tsp={"C Fund": _walk(105.0, 0.0006, 0.009, 4)})
+
+
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8790
     fake = bank()
+    feed = price_feed()
     plan.save(demo_plan())
+    manual.save(demo_manual())
     with contextlib.closing(db.connect()) as conn:
         print([r["status"] for r in sync.sync_all(conn, lambda env: fake)], flush=True)
-    app = create_app(make_client=lambda env: fake)
+        prices.refresh(conn, manual.load(), TODAY, feed, tickers=["BND", "VTI"])
+    app = create_app(make_client=lambda env: fake, get_url=feed)
     print(f"Demo (made-up data) at http://127.0.0.1:{port}", flush=True)
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

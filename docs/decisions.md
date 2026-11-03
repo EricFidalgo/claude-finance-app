@@ -6,26 +6,56 @@ One line each: what was chosen and why.
 
 - **Python 3.12, SQLite, Starlette, uvicorn.** Small, no ORM, one process; the Plaid prototypes were already Python.
 - **Scheduler inside the app** (a background task every 6 hours, 5 minutes while Plaid says PRODUCT_NOT_READY). One container, nothing else to run.
-- **Frontend: plain JS, CSS and HTML in `finance/static/`, no build step.** Six screens don't need a framework, and nothing has to be installed to change one.
+- **Frontend: plain JS, CSS and HTML in `finance/static/`, no build step.** Seven screens don't need a framework, and nothing has to be installed to change one.
 - **No service worker.** Stale balances served from a cache are worse than "can't reach the server"; the manifest alone makes it installable.
 - **Polling, no webhooks.** A webhook needs a public URL, and the app has none on purpose.
+- **Outbound calls go only to Plaid, Yahoo Finance and tsp.gov.** Yahoo gets a ticker and a date range, tsp.gov the download everyone gets; share counts and balances stay here. The tickers are the manual funds' symbols plus, after each bank sync, the brokerage holdings' Plaid tickers (VTI, BND…), so the value-over-time chart has a year of prices; which tickers you hold is the one thing Yahoo learns.
+- **The app shell scrolls `<main>`, not the page.** The header and tab bar are plain flex rows around it. A `position: fixed` bottom bar on iPhone Safari drifts partway up the screen while the toolbar collapses or the page rubber-bands; with the page itself never scrolling, there is nothing for it to drift against.
 
 ## Money
 
-- **Integer cents everywhere inside the app; dollars only in `data/plan.json`** (what a person types). Plaid's floats go through `Decimal` once, at sync.
+- **Integer cents everywhere inside the app; dollars only in `data/plan.json` and `data/manual.json`** (what a person types). Plaid's floats go through `Decimal` once, at sync. Per-share prices are the exception: stored as published (REAL, at most 4 places), and a value is worked out in `Decimal` and rounded to cents once.
 - **Plaid's sign is kept: positive is money out, negative is money in.** Flipping it in one place and not another is the classic bug; keeping the source's sign avoids that.
 - **Spending excludes income, transfers to own accounts (Plaid's account, savings and investment transfers) and card payments; refunds net in; pending counts.** Otherwise paying the card bill would count every purchase twice. Zelle/Venmo payments to people (`TRANSFER_OUT_FROM_APPS`) count as spending.
 - **Accounts are keyed by institution family + mask** (`bofa:2222`). Merrill and Bank of America share a login and both report CMA-Edge, so it counts once in net worth.
 - **Safe-to-spend = (checking available − plan bills due before next payday and not yet paid − card balance owed − buffer) ÷ days to payday.** It shows a "fill in your plan" prompt, not a guess, until income and bills exist.
+- **Today's allowance = (safe-to-spend pool + spent today) ÷ days to payday, and "left today" = allowance − spent today.** Adding today's spending back makes the allowance what the day started with, so it holds still as you spend instead of shrinking with every purchase. Spent today leaves out payments of plan bills, which the pool already reserved. Rent, plan bills, the card balance and the buffer are set aside first; the allowance covers everything else (food, gas, fun, subscriptions not in the plan).
+- **The bills calendar shows this month and next, from the plan's paydays and bills plus detected recurring charges.** A plan bill counts as paid when a matching payment lands from 7 days before its due date to 5 days after (autopay posts early, a manual payment can run late); a detected charge is paid on the days it was charged and projected forward by its cadence. Two months covers "what's left before payday" without guessing at schedules further out.
+- **Tips are worked out from the owner's own numbers, at most three on Today.** A category's pace tip waits until the 8th of the month, because one early grocery run projects to a wild monthly figure; it shows sooner only when the target is already spent.
 - **Consent is estimated at 12 months for Bank of America** because Plaid reports no expiry date for it; the count restarts when a re-link through the link page succeeds.
 - **Card owed includes pending charges** (limit − available when the bank reports both), because that is what the next statement will ask for.
 
+## Manual investments
+
+- **Accounts Plaid can't link go in `data/manual.json`, edited by Claude or by hand, with no screen.** The owner's fund companies aren't in Plaid, and share counts change a few times a year.
+- **Prices come from Yahoo Finance (funds) and tsp.gov (TSP funds): both keyless.** A paid quote API would add a key for numbers that are public.
+- **Each price source gets its own User-Agent.** Yahoo rate-limits a full browser string; tsp.gov refuses a short one.
+- **A TSP balance turns into shares at its `as_of` price, and `per_paycheck` buys more on each plan payday**, so the value follows the fund between the balances the owner types in.
+- **Value over time holds today's share counts fixed and prices them at each day's close.** Plaid gives no history of buys and sells, so the chart shows how the holdings moved, not what was deposited, and says so. Cash and holdings with no price history count at today's value every day. The last point is today at the total shown on the screen, so the line ends where the headline number is.
+- **The projection compounds once a year at 4%, 7% and 10%, real (after inflation), with a year of paycheck contributions plus any extra the owner types.** 7% is roughly the long-run real return of US stocks, so the results read in today's dollars; the 4–10% band is there so no one reads the middle line as a promise. Contributions come from the plan's paydays × each manual holding's `per_paycheck`. It starts from the invested amount, not cash, since cash sitting idle doesn't earn stock returns.
+- **Prices refresh after every sync and on each save, and a price failure never fails the bank sync**; the last stored prices stand.
+
 ## Recurring charges and flags
 
+- **It takes repeat charges to call something recurring; a single charge never counts, whatever its descriptor says.** Bank of America prints RECURRING on any charge to a card on file, so a one-off Apple purchase or a utility paid once carries it.
 - **A fixed series is ≥3 charges of the same merchant within 5% on a weekly, biweekly or monthly cadence; 2 are enough only when they are all the merchant's charges.** Among a restaurant's dozens of charges, two similar amounts a month apart are chance.
 - **A variable series (utilities) needs 3 charges on cadence at any amount.**
 - **A series follows a price change**: the next charge within ±5 days of the expected date continues it, so a price rise shows as a flag, not a new subscription.
 - **A plan bill marked `fixed: false` never gets a price-change flag**, only "higher than usual" (>1.5× its median).
+
+## Attention list
+
+- **Dismissals live in the database, not the browser,** so the phone and the computer agree and a cleared browser doesn't bring them back. The card starts collapsed on a fresh launch or after 30 minutes away, even with something urgent: the owner's call, because an open list pushed the money and the bills down the screen. The collapsed row says how many and how many are urgent, so nothing is hidden silently.
+- **An alert's id names one occurrence** (this bill at this amount on this due date, this charge, this outage since the last good sync). Dismissing hides that occurrence only: next month's uncovered bill, a raised bill, a new flagged charge or a fresh outage all show. A consent warning shows again when it turns urgent. Ids are hashed because they go to the browser and can be built from a Plaid item id.
+- **Every alert can be dismissed, even a broken login.** The header's "Stale" line doesn't go through this list, so hidden sync trouble still shows there. With nothing to show the card disappears, since an empty box only takes up room, leaving a quiet "1 alert dismissed" line with a Bring back button while anything live is hidden, and the snapshot gives Claude the count. "Bring back" restores all of them, as a safety net for a mistaken tap.
+
+## Screens
+
+- **Today shows what's been spent today, this week and this pay period (this month without a pay schedule), above the recent transactions.** The owner's first questions on opening the app; each figure opens its transactions. These count a plan bill paid today as spending, as Spending does; the allowance doesn't, so on a bill day it says how much went to bills.
+- **Transactions is its own screen, not a list at the foot of Spending** (`#transactions?period=…` or `?start=&end=`, plus `q`, `category`, `merchant`). Any period or dates, search and filters in one place, opened pre-filtered from Today and Spending. A merchant matches its name exactly, as Top merchants groups, so the totals agree; the search matches any part of a name. The home-screen app has no browser back button, so the screen has its own, and each history entry remembers where it was opened from. Money out that isn't spending (transfers, card payments) is muted, so the rows visibly add up to the total.
+- **On Spending, Top merchants and Flagged start folded:** the owner's call, since every charge is theirs. The folded row still gives the count. Each card stays open or folded while you move around the app, and folds again on a fresh launch.
+- **A chart opens larger in a full-height sheet** (the expand button). Dragging across the chart reads values, and a pull down on its header or a tap outside closes it. This replaces pinch-zoom inside the chart, which fights the page's own scrolling and zoom on a phone.
+- **Charts, bars and tiles can't be selected or copied** (`user-select: none`, no long-press callout or context menu). A long press on a chart reads it; on a bar or tile it's a tap.
 
 ## Security and exposure
 

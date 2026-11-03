@@ -6,7 +6,8 @@ Conventions (also in CLAUDE.md):
   income and credit-card payments are not spending. Pending transactions count.
 """
 import calendar
-from collections import defaultdict
+import hashlib
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -47,8 +48,18 @@ def _prev_month(d):
     return (d.year - 1, 12) if d.month == 1 else (d.year, d.month - 1)
 
 
-def period_range(period, today):
-    """(start, end, previous_start, previous_end) as dates. To-date periods compare with the same elapsed days."""
+def period_range(period, today, income=None, start=None, end=None):
+    """(start, end, previous_start, previous_end) as dates. To-date periods compare with the same elapsed days.
+    The pay period runs from the last payday on or before today, so it needs the plan's income. A custom
+    period is start..end, compared with as many days just before it."""
+    if period == "custom":
+        return start, end, start - (end - start) - timedelta(days=1), start - timedelta(days=1)
+    if period == "pay_period":
+        if not income:
+            raise ValueError("the pay period needs a pay schedule in the plan")
+        start = previous_payday(income, today)
+        pstart = previous_payday(income, start - timedelta(days=1))
+        return start, today, pstart, min(pstart + (today - start), start - timedelta(days=1))
     if period == "today":
         y = today - timedelta(days=1)
         return today, today, y, y
@@ -74,8 +85,8 @@ def _in(txn, start, end):
     return _iso(start) <= txn["date"] <= _iso(end)
 
 
-def spend_summary(txns, period, today):
-    start, end, pstart, pend = period_range(period, today)
+def spend_summary(txns, period, today, income=None, start=None, end=None):
+    start, end, pstart, pend = period_range(period, today, income, start, end)
     rows = [t for t in txns if _in(t, start, end) and is_spending(t)]
     previous = sum(t["amount_cents"] for t in txns if _in(t, pstart, pend) and is_spending(t))
     total = sum(t["amount_cents"] for t in rows)
@@ -240,6 +251,15 @@ def next_payday(income, today):
     raise AssertionError("unreachable")
 
 
+def previous_payday(income, today):
+    """Last payday on or before today: where the current pay period starts. Every schedule pays within 62 days."""
+    d = today - timedelta(days=62)
+    anchored, last = _anchored_by(income, d), None
+    while (d := next_payday(anchored, d)) <= today:
+        last = d
+    return last
+
+
 def bill_dates(bill, start, end):
     """Due dates of a monthly bill in [start, end)."""
     out, n = [], 0
@@ -261,17 +281,21 @@ def _name_key(s):
     return (s or "").lower().split()[0] if (s or "").split() else ""
 
 
-def bill_paid(bill, due, txns, window_days=7):
-    """A matching outflow (name, amount within 10% unless variable) within `window_days` before the due date."""
+def pays_bill(bill, txn):
+    """An outflow naming the bill, for its amount within 10% unless the bill varies."""
     key, amount = _name_key(bill["name"]), to_cents(bill["amount"])
-    lo = _iso(due - timedelta(days=window_days))
-    for x in txns:
-        if not (lo <= x["date"] <= _iso(due)) or x["amount_cents"] <= 0:
-            continue
-        names = (x.get("merchant_name") or "").lower() + " " + (x.get("name") or "").lower()
-        if key and key in names and (not bill.get("fixed", True) or abs(x["amount_cents"] - amount) <= amount / 10):
-            return True
-    return False
+    names = (txn.get("merchant_name") or "").lower() + " " + (txn.get("name") or "").lower()
+    return txn["amount_cents"] > 0 and bool(key) and key in names and \
+        (not bill.get("fixed", True) or abs(txn["amount_cents"] - amount) <= amount / 10)
+
+
+PAID_EARLY_DAYS, PAID_LATE_DAYS = 7, 5
+
+
+def bill_paid(bill, due, txns):
+    """A payment of the bill from a week before the due date to a few days after it."""
+    lo, hi = _iso(due - timedelta(days=PAID_EARLY_DAYS)), _iso(due + timedelta(days=PAID_LATE_DAYS))
+    return any(lo <= x["date"] <= hi and pays_bill(bill, x) for x in txns)
 
 
 def safe_to_spend(accounts, plan, txns, today):
@@ -288,6 +312,15 @@ def safe_to_spend(accounts, plan, txns, today):
     buffer = to_cents(plan.get("buffer") or 0)
     available = checking - bills - cards - buffer
     days = (payday - today).days
+    # Today's allowance is what the day started with, so it holds still while you spend. A plan bill paid today
+    # is a bill, not spending, so it neither counts as spent nor comes back. Only a bill due inside bill_paid's window
+    # counts as paid by today's payment, so a purchase that merely shares a bill's name is spending.
+    due_soon = [b for b in plan["bills"] if bill_dates(b, today - timedelta(days=PAID_LATE_DAYS),
+                                                       today + timedelta(days=PAID_EARLY_DAYS + 1))]
+    today_spending = [x for x in txns if x["date"] == _iso(today) and is_spending(x)]
+    bills_paid = sum(x["amount_cents"] for x in today_spending if any(pays_bill(b, x) for b in due_soon))
+    spent = sum(x["amount_cents"] for x in today_spending) - bills_paid
+    allowance = round((available + spent) / days)
     return {
         "status": "ok",
         "payday": _iso(payday),
@@ -295,11 +328,135 @@ def safe_to_spend(accounts, plan, txns, today):
         "bills": [{"name": b["name"], "due": _iso(d), "amount_cents": to_cents(b["amount"])} for d, b in due],
         "available_cents": available,
         "per_day_cents": round(available / days),
+        "spent_today_cents": spent,
+        "bills_paid_today_cents": bills_paid,
+        "allowance_cents": allowance,
+        "left_today_cents": allowance - spent,
         "lines": [{"label": "Checking (available)", "amount_cents": checking},
                   {"label": "Bills before payday", "amount_cents": -bills},
                   {"label": "Credit card owed", "amount_cents": -cards},
                   {"label": "Buffer", "amount_cents": -buffer}],
     }
+
+
+# --- manually entered holdings (data/manual.json)
+
+def slug(name):
+    return "-".join("".join(c if c.isalnum() else " " for c in name.lower()).split())
+
+
+def price_on(series, d):
+    """The last (ISO date, price) on or before date d in an oldest-first series, else None."""
+    found = None
+    for row in series:
+        if row[0] > _iso(d):
+            break
+        found = row
+    return found
+
+
+def _price(row):
+    return Decimal(str(row[1]))
+
+
+def _anchored_by(income, d):
+    """`income` with its anchor payday moved back whole periods to d or earlier. next_payday never counts back
+    from the anchor (a new job's first payday has none before it), but a balance on d was being paid into."""
+    anchor = date.fromisoformat(income["next_payday"])
+    if anchor <= d or income["schedule"] == "semimonthly":  # semimonthly paydays come from its days, not the anchor
+        return income
+    if income["schedule"] == "monthly":
+        anchor = _add_months(anchor, -12 * (anchor.year - d.year + 1), anchor.day)  # whole years keep the day
+    else:
+        step = 7 if income["schedule"] == "weekly" else 14
+        anchor -= timedelta(days=step * -((d - anchor).days // step))
+    return {**income, "next_payday": anchor.isoformat()}
+
+
+def manual_shares(holding, series, income, today):
+    """Shares held today. A holding entered as a balance (TSP) converts it at the price on its as_of date, then
+    buys per_paycheck more at each plan payday since, at that day's price. None until a price covers as_of."""
+    if holding.get("shares") is not None:
+        return Decimal(str(holding["shares"]))
+    as_of = date.fromisoformat(holding["as_of"])
+    start = price_on(series, as_of)
+    if start is None:
+        return None
+    shares = Decimal(str(holding["balance"])) / _price(start)
+    d, income = as_of, income and _anchored_by(income, as_of)
+    while income and holding.get("per_paycheck") and (d := next_payday(income, d)) <= today:
+        shares += Decimal(str(holding["per_paycheck"])) / _price(price_on(series, d))
+    return shares
+
+
+def manual_holdings(doc, prices, income, today):
+    """Accounts and holdings from data/manual.json, valued at the latest stored price.
+
+    `prices` maps symbol -> [(ISO date, price)], oldest first. Rows are shaped like `store.accounts` and
+    `store.holdings`, so net worth, allocation and the snapshot treat them like linked ones.
+    """
+    accounts, holdings = [], []
+    for a in doc.get("accounts") or []:
+        key = f"manual:{slug(a['name'])}"
+        rows = []
+        for h in a["holdings"]:
+            series = prices.get(h["symbol"]) or []
+            latest = series[-1] if series else None
+            shares = manual_shares(h, series, income, today)
+            priced = shares is not None and latest is not None
+            rows.append({"account_key": key, "account_name": a["name"], "account_mask": None,
+                         # TSP:C and the like name a fund at a source, not an exchange ticker
+                         "security_id": f"manual:{h['symbol']}", "ticker": None if ":" in h["symbol"] else h["symbol"],
+                         "name": h.get("name") or h["symbol"], "type": "mutual fund", "is_cash_equivalent": False,
+                         "quantity": float(shares) if shares is not None else None,
+                         "value_cents": to_cents(shares * _price(latest)) if priced else None,
+                         "cost_basis_cents": None, "updated_at": latest[0] if priced else None})
+        holdings += rows
+        accounts.append({"account_key": key, "institution": "Manual", "name": a["name"], "official_name": None,
+                         "type": "investment", "subtype": None, "mask": None,
+                         "current_cents": sum(r["value_cents"] or 0 for r in rows), "available_cents": None,
+                         "limit_cents": None, "currency": "USD",
+                         "updated_at": max((r["updated_at"] for r in rows if r["updated_at"]), default=None)})
+    return accounts, holdings
+
+
+PAYDAYS_A_YEAR = {"weekly": 52, "biweekly": 26, "semimonthly": 24, "monthly": 12}
+
+
+def yearly_contributions(doc, income):
+    """What the hand-entered holdings buy in a year from each paycheck (TSP per_paycheck), in cents."""
+    per_paycheck = sum(to_cents(h.get("per_paycheck") or 0) for a in doc.get("accounts") or [] for h in a["holdings"])
+    return per_paycheck * PAYDAYS_A_YEAR[income["schedule"]] if income else 0
+
+
+def price_symbol(holding):
+    """The symbol its prices are stored under: a hand-entered holding's own symbol (TSP:C), else its ticker."""
+    sid = holding.get("security_id") or ""
+    return sid[len("manual:"):] if sid.startswith("manual:") else holding.get("ticker")
+
+
+def portfolio_history(holdings, prices, start, end):
+    """What the shares held now were worth on each price date in [start, end], ending on `end` (today) at today's value.
+
+    Quantities stay as they are today, so this shows how the holdings moved, not deposits. Cash and holdings with
+    no stored prices count at today's value on every day. The line starts once every priced holding has a price.
+    """
+    priced, flat, unpriced = [], 0, []
+    for x in holdings:
+        series = prices.get(price_symbol(x)) or []
+        if bucket_of(x) != "cash" and series and x.get("quantity") is not None:
+            priced.append((Decimal(str(x["quantity"])), series))
+        else:
+            flat += x.get("value_cents") or 0
+            if bucket_of(x) != "cash":
+                unpriced.append(x.get("name") or x.get("ticker"))
+    first = max([_iso(start)] + [series[0][0] for _, series in priced])
+    days = sorted({d for _, series in priced for d, _ in series if first <= d <= _iso(end)})
+    points = [{"date": d, "total_cents": flat + sum(to_cents(q * _price(price_on(series, date.fromisoformat(d))))
+                                                     for q, series in priced)} for d in days]
+    if points and points[-1]["date"] < _iso(end):
+        points.append({"date": _iso(end), "total_cents": sum(x.get("value_cents") or 0 for x in holdings)})
+    return {"points": points, "flat_cents": flat, "unpriced": unpriced}
 
 
 # --- recurring charges
@@ -357,9 +514,10 @@ def detect_recurring(txns, today):
     """Recurring outflows: same merchant charging a steady amount (fixed) or any amount (variable) on a cadence.
 
     Within a merchant, charges within 5% of each other form one fixed series, so several subscriptions billed under
-    one name (Apple.com/bill) stay separate. A lone charge the bank labels RECURRING counts as monthly.
-    Two charges make a series only when they are all the merchant has: among a restaurant's many charges, two
-    similar amounts a week apart are chance. A variable series needs three.
+    one name (Apple.com/bill) stay separate. It takes repeat charges: the RECURRING a bank prints in a descriptor only
+    means the card is on file with the merchant, and one-off Apple purchases carry it too. Two charges make a series
+    only when they are all the merchant has: among a restaurant's many charges, two similar amounts a week apart are
+    chance. A variable series needs three.
     """
     by_merchant = defaultdict(list)
     for x in sorted(txns, key=lambda x: x["date"]):
@@ -394,10 +552,6 @@ def detect_recurring(txns, today):
         found += fixed
         if not fixed and len(rows) >= 3 and (cadence := _cadence([date.fromisoformat(x["date"]) for x in rows])):
             found.append(_series(rows, cadence, False))
-            continue
-        for c in clusters:
-            if len(c) == 1 and "RECURRING" in (c[0].get("name") or "").upper():
-                found.append(_series(c, "monthly", True))
     # A series is over once a whole extra cycle passes with no charge.
     grace = {name: hi for name, _, hi in CADENCES}
     active = [s for s in found if date.fromisoformat(s["next_due"]) + timedelta(days=grace[s["cadence"]]) >= today]
@@ -412,7 +566,8 @@ def _days_apart(a, b):
 
 def _flag(kind, x, detail, previous=None):
     return {"kind": kind, "transaction_id": x["transaction_id"], "merchant": merchant_of(x),
-            "amount_cents": x["amount_cents"], "date": x["date"], "account_key": x.get("account_key"),
+            "amount_cents": x["amount_cents"], "date": x["date"], "authorized_date": x.get("authorized_date"),
+            "account_key": x.get("account_key"),
             "previous_cents": previous, "detail": detail}
 
 
@@ -524,6 +679,96 @@ def upcoming_bills(accounts, plan, recurring, txns, today, days=35):
             "paydays": [_iso(d) for d in paydays], "uncovered": sum(r["covered"] is False for r in rows)}
 
 
+def month_events(plan, recurring, txns, start, end, today):
+    """Paydays and bills in [start, end), past and future, for a month view.
+
+    Plan bills are paid when a matching payment shows up; detected charges are paid on the dates they were charged
+    and projected forward from today by their cadence.
+    """
+    events = []
+    income = plan.get("income")
+    if income:
+        anchored = _anchored_by(income, start)
+        d = next_payday(anchored, start - timedelta(days=1))
+        while d < end:
+            events.append({"date": _iso(d), "kind": "payday", "name": "Payday",
+                           "amount_cents": to_cents(income["amount"]), "paid": False})
+            d = next_payday(anchored, d)
+    declared = plan.get("bills") or []
+    for b in declared:
+        for d in bill_dates(b, start, end):
+            events.append({"date": _iso(d), "kind": "bill", "name": b["name"], "amount_cents": to_cents(b["amount"]),
+                           "paid": bill_paid(b, d, txns)})
+    for s in recurring:
+        if any(_matches(b, s) for b in declared):
+            continue
+        amount = s["amount_cents"] if s["fixed"] else s["median_cents"]
+        events += [{"date": x, "kind": "bill", "name": s["merchant"], "amount_cents": amount, "paid": True}
+                   for x in s["dates"] if _iso(start) <= x < _iso(end)]
+        d = date.fromisoformat(s["next_due"])
+        while d < end:
+            if d >= max(today, start):
+                events.append({"date": _iso(d), "kind": "bill", "name": s["merchant"], "amount_cents": amount,
+                               "paid": False})
+            d = next_after(d, s["cadence"])
+    return sorted(events, key=lambda e: (e["date"], e["kind"], e["name"]))
+
+
+# --- tips
+
+PER_MONTH = {"weekly": 52 / 12, "biweekly": 26 / 12, "monthly": 1}
+UTILIZATION_TIP_PCT = 30
+RUNWAY_TIP_MONTHS = 3
+
+
+def _whole(c):
+    return f"${round(c / 100):,}"
+
+
+def tips(accounts, holdings, plan, txns, recurring, typical_monthly_cents, today):
+    """Short, specific nudges, most pressing first: budgets on pace to overrun, cards over 30% used, thin cash,
+    and repeat charges the plan doesn't set aside."""
+    out = []
+    start, days_in = today.replace(day=1), calendar.monthrange(today.year, today.month)[1]
+    for category, target in (plan.get("monthly_spend") or {}).items():
+        spent = sum(x["amount_cents"] for x in txns if x["category"] == category and _in(x, start, today)
+                    and is_spending(x))
+        target, pace = to_cents(target), round(spent / today.day * days_in)
+        # a week in, the month's pace means something; before that only an overrun does
+        if spent > target or (pace > target and today.day > 7):
+            left_days = days_in - today.day
+            rest = (f"{dollars(round((target - spent) / left_days))} a day for the rest of {today:%B} keeps it on target."
+                    if left_days and spent < target else "It's over already.")
+            out.append({"kind": "pace", "title": f"{category.replace('_', ' ').capitalize()} is on pace for "
+                                                 f"{_whole(pace)} this month",
+                        "detail": f"Your target is {_whole(target)} and {_whole(spent)} is spent. {rest}"})
+    for x in accounts:
+        if x.get("type") == "credit" and x.get("limit_cents"):
+            pct = round(100 * card_owed(x) / x["limit_cents"])
+            if pct > UTILIZATION_TIP_PCT:
+                out.append({"kind": "card", "title": f"Card …{x['mask']} is {pct}% used",
+                            "detail": f"Paying it under {UTILIZATION_TIP_PCT}% "
+                                      f"({_whole(x['limit_cents'] * UTILIZATION_TIP_PCT / 100)}) before the "
+                                      "statement closes helps your credit score."})
+    r = runway(accounts, holdings, typical_monthly_cents)
+    if r["months"] is not None and r["months"] < RUNWAY_TIP_MONTHS:
+        out.append({"kind": "runway", "title": f"Cash covers {r['months']:g} months of spending",
+                    "detail": "Checking and brokerage cash, less the card, against a typical "
+                              f"{_whole(typical_monthly_cents)} month. Three months is a common cushion."})
+    declared = plan.get("bills") or []
+    per_month = {x["key"]: (x["amount_cents"] if x["fixed"] else x["median_cents"]) * PER_MONTH[x["cadence"]]
+                 for x in recurring if not any(_matches(b, x) for b in declared)}
+    extra = sorted((x for x in recurring if x["key"] in per_month), key=lambda x: -per_month[x["key"]])
+    if extra:
+        monthly = sum(per_month.values())
+        out.append({"kind": "subscriptions",
+                    "title": f"{len(extra)} repeat charge{'s' * (len(extra) > 1)} outside your plan: "
+                             f"{dollars(round(monthly))} a month",
+                    "detail": f"{', '.join(x['merchant'] for x in extra)}. Add the ones you keep to the plan so "
+                              "safe-to-spend sets them aside."})
+    return out
+
+
 # --- investing: left to invest
 
 RESERVE_MONTHS = (0, 1, 3)
@@ -585,43 +830,60 @@ def _day(iso):
     return f"{d:%a, %b} {d.day}"
 
 
-def _alert(level, kind, title, detail):
-    return {"level": level, "kind": kind, "title": title, "detail": detail}
+def _alert(level, kind, occurrence, title, detail):
+    """`occurrence` names this happening of the problem, so dismissing it never hides the next one.
+
+    It's hashed because the id goes to the browser and an occurrence can hold a Plaid item id.
+    """
+    digest = hashlib.sha256(":".join(str(x) for x in occurrence).encode()).hexdigest()[:16]
+    return {"id": f"{kind}:{digest}", "level": level, "kind": kind, "title": title, "detail": detail}
 
 
 def alerts(items, upcoming, unusual, now):
-    """The attention list at the top of Today, most urgent first."""
+    """The attention list at the top of Today, most urgent first.
+
+    A bank problem is one occurrence until a sync succeeds; a warning that turns urgent is a new one. A flagged charge
+    goes by its authorized date, because posting gives a pending charge a new transaction id and often a new date; if
+    posting changes its amount or merchant name, it shows once more. Identical charges are numbered, so each is
+    dismissed on its own.
+    """
     found = []
     for it in items:
         name = it["institution"]
+        since = (it["item_id"], it.get("last_synced_at"))
         if it["status"] == "login_required":
-            found.append(_alert("urgent", "login_required", f"{name} needs you to sign in again",
+            found.append(_alert("urgent", "login_required", since, f"{name} needs you to sign in again",
                                 "Run ./run.sh link on the computer and press Fix login. Data stops updating until then."))
         elif it["status"] == "error":
-            found.append(_alert("warn", "sync_error", f"{name} sync failed",
+            found.append(_alert("warn", "sync_error", since, f"{name} sync failed",
                                 f"{it.get('error_code') or 'Unknown error'}. The next sync will retry."))
         elif it["status"] == "not_ready":
-            found.append(_alert("info", "not_ready", f"{name} is still preparing data",
+            found.append(_alert("info", "not_ready", since, f"{name} is still preparing data",
                                 "Plaid is gathering history. The app retries every few minutes."))
         c = consent(it, now)
         if c and c["days_left"] <= 30:
-            found.append(_alert("urgent" if c["days_left"] <= 7 else "warn", "consent_expiring",
+            level = "urgent" if c["days_left"] <= 7 else "warn"
+            found.append(_alert(level, "consent_expiring", (it["item_id"], c["expires"], level),
                                 f"{name} access ends in {c['days_left']} days",
                                 f"{'About ' if c['estimated'] else ''}{_day(c['expires'])}. Re-link with ./run.sh link "
                                 "before then to keep data flowing."))
     for b in upcoming["bills"]:
         if b.get("covered") is False:
-            found.append(_alert("urgent", "uncovered_bill", f"Checking may not cover {b['name']}",
+            found.append(_alert("urgent", "uncovered_bill", (b["name"], b["due"], b["amount_cents"]),
+                                f"Checking may not cover {b['name']}",
                                 f"{dollars(b['amount_cents'])} due {_day(b['due'])}."))
+    seen = Counter()
     for u in unusual:
-        found.append(_alert("warn", "unusual_charge", f"{u['merchant']} {dollars(u['amount_cents'])} on {_day(u['date'])}",
-                            u["detail"]))
+        charge = (u["kind"], u["merchant"], u["amount_cents"], u.get("authorized_date") or u["date"])
+        seen[charge] += 1
+        found.append(_alert("warn", "unusual_charge", (*charge, seen[charge]),
+                            f"{u['merchant']} {dollars(u['amount_cents'])} on {_day(u['date'])}", u["detail"]))
     stale_after = timedelta(hours=config.STALE_AFTER_HOURS)
     for it in items:
         last = it.get("last_synced_at")
         age = _when(now) - _when(last) if last else None
         if it["status"] == "ok" and (age is None or age > stale_after):
             ago = f"{int(age.total_seconds() // 3600)} hours ago" if age else "never"
-            found.append(_alert("warn", "stale_sync", f"{it['institution']} last synced {ago}",
+            found.append(_alert("warn", "stale_sync", (it["item_id"], last), f"{it['institution']} last synced {ago}",
                                 "Sync runs every 6 hours while the container is up. Tap Sync now to retry."))
     return sorted(found, key=lambda x: LEVELS[x["level"]])

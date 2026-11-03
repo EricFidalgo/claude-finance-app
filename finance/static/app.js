@@ -7,15 +7,25 @@ const toastEl = document.getElementById('toast');
 const syncedEl = document.getElementById('synced');
 const syncBtn = document.getElementById('sync');
 
-const TITLES = { today: 'Today', spending: 'Spending', bills: 'Bills', money: 'Money', investing: 'Investing', plan: 'Plan' };
-const PERIODS = [['today', 'Today'], ['week', 'This week'], ['last_week', 'Last week'], ['month', 'This month'], ['last_month', 'Last month']];
+const TITLES = { today: 'Today', spending: 'Spending', transactions: 'Transactions', bills: 'Bills', money: 'Money',
+  investing: 'Investing', plan: 'Plan' };
+const TAB_OF = { transactions: 'spending' };  // a sub-screen lights up the tab it belongs to
+// Pay period shows only with a pay schedule in the plan; Custom opens two date fields.
+const PERIODS = [['today', 'Today'], ['week', 'This week'], ['pay_period', 'Pay period'], ['month', 'This month'],
+  ['last_week', 'Last week'], ['last_month', 'Last month'], ['custom', 'Custom']];
 const PERIOD_INFO = {
   today: { title: 'Spent today', prev: 'yesterday' },
   week: { title: 'Spent this week', prev: 'same days last week', series: ['This week', 'Last week'] },
-  last_week: { title: 'Spent last week', prev: 'the week before', series: ['Last week', 'Week before'] },
+  pay_period: { title: 'Spent since payday', prev: 'same days last pay period', series: ['This pay period', 'Last pay period'] },
   month: { title: 'Spent this month', prev: 'same days last month', series: ['This month', 'Last month'] },
+  last_week: { title: 'Spent last week', prev: 'the week before', series: ['Last week', 'Week before'] },
   last_month: { title: 'Spent last month', prev: 'the month before', series: ['Last month', 'Month before'] },
+  custom: { title: 'Spent in these dates', prev: 'the same number of days before', series: ['These dates', 'Days before'] },
 };
+const SPENT_LABEL = { today: 'Today', week: 'This week', pay_period: 'Pay period', month: 'This month' };
+const TOP_MERCHANTS = 10;
+const MAX_ROWS = 2000;  // the most transactions one request returns
+const PAGE = 100;       // rows drawn at a time; Show more adds the next lot
 const CATEGORIES = ['FOOD_AND_DRINK', 'GENERAL_MERCHANDISE', 'TRANSPORTATION', 'ENTERTAINMENT', 'RENT_AND_UTILITIES',
   'PERSONAL_CARE', 'MEDICAL', 'TRAVEL', 'HOME_IMPROVEMENT', 'GENERAL_SERVICES', 'LOAN_PAYMENTS', 'BANK_FEES',
   'GOVERNMENT_AND_NON_PROFIT'];
@@ -23,7 +33,14 @@ const CATEGORIES = ['FOOD_AND_DRINK', 'GENERAL_MERCHANDISE', 'TRANSPORTATION', '
 const BUCKETS = [['stock', 'Stocks', 's1'], ['etf', 'ETFs', 's2'], ['fund', 'Funds', 's3'], ['other', 'Other', 's4'], ['cash', 'Cash', 's5']];
 const STALE_HOURS = 13;
 
-const state = { screen: null, period: stored('period', 'month'), seq: 0, hiddenAt: 0, planDirty: false };
+const state = {
+  screen: null, from: null, seq: 0, hiddenAt: 0, planDirty: false, attentionOpen: false,
+  period: stored('period', 'month'), range: { start: stored('spendStart', ''), end: stored('spendEnd', '') },
+  view: null,     // the transactions screen's period, for Ask Claude
+  folds: {},      // which folded cards are open, kept while moving around the app
+  scroll: {},     // where each screen was scrolled to, restored on the way back
+  restore: false, // the next render is a return via Back
+};
 
 // --- small helpers
 
@@ -66,13 +83,18 @@ const ICONS = {
   info: [['circle', { cx: 12, cy: 12, r: 9 }], ['path', { d: 'M12 11v5.5M12 7.5h.01' }]],
   payday: [['rect', { x: 3, y: 6, width: 18, height: 12, rx: 2 }], ['circle', { cx: 12, cy: 12, r: 2.5 }]],
   repeat: [['path', { d: 'M4 11V9a3 3 0 0 1 3-3h12M16 3l3 3-3 3M20 13v2a3 3 0 0 1-3 3H5M8 21l-3-3 3-3' }]],
+  close: [['path', { d: 'M6 6l12 12M18 6 6 18' }]],
+  chevron: [['path', { d: 'M6 9.5l6 6 6-6' }]],
+  right: [['path', { d: 'M9.5 6l6 6-6 6' }]],
+  back: [['path', { d: 'M14.5 6l-6 6 6 6' }]],
+  expand: [['path', { d: 'M14 4h6v6M10 20H4v-6M20 4l-6.5 6.5M4 20l6.5-6.5' }]],
 };
 function icon(name) {
   return s('svg', { viewBox: '0 0 24 24', class: 'ico', 'aria-hidden': 'true' },
     ICONS[name].map(([tag, a]) => s(tag, a)));
 }
 // Status is never color alone: an icon in the status color plus a text label in ink.
-const LEVEL = { urgent: ['critical', 'Urgent'], warn: ['warning', 'Check'], info: ['info', 'FYI'] };
+const LEVEL_ICON = { urgent: 'critical', warn: 'warning', info: 'info' };
 function statusLine(kind, text) {
   return h('span', { class: `status st-${kind}` }, icon(kind === 'good' ? 'check' : kind === 'serious' ? 'warning' : kind), text);
 }
@@ -83,6 +105,7 @@ const minus = (t) => t.replace('-', '−');
 const money = (c) => (c == null ? '—' : minus(USD.format(c / 100)));
 const money0 = (c) => (c == null ? '—' : minus(USD0.format(Math.round(c / 100))));
 const signed = (c) => (c > 0 ? '+' : '') + money(c);
+const compact = (c) => (Math.abs(c) >= 100000 ? money0(c) : money(c));  // cents only below $1,000, to fit a tile
 function short$(dollars) {
   if (dollars >= 1000) return '$' + (dollars / 1000).toFixed(dollars % 1000 ? 1 : 0).replace(/\.0$/, '') + 'k';
   return '$' + Math.round(dollars);
@@ -96,6 +119,13 @@ const DAY_FMT = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'sho
 const SHORT_FMT = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
 const fmtDay = (iso) => DAY_FMT.format(parseDay(iso));
 const fmtShort = (iso) => SHORT_FMT.format(parseDay(iso));
+const YEAR_FMT = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+function fmtRange(start, end) {
+  if (start === end) return fmtDay(start);
+  const year = todayDate().getFullYear();
+  const f = (iso) => (parseDay(iso).getFullYear() === year ? fmtShort(iso) : YEAR_FMT.format(parseDay(iso)));
+  return `${f(start)} – ${f(end)}`;
+}
 function relDay(iso) {
   const n = Math.round((parseDay(iso) - todayDate()) / 864e5);
   if (n === 0) return 'today';
@@ -125,7 +155,9 @@ async function api(path, opts = {}) {
 
 let toastTimer;
 function toast(text, link) {
-  toastEl.replaceChildren(h('span', {}, text), link && h('a', { href: link.href, target: '_blank', rel: 'noopener' }, link.text));
+  const kids = [h('span', {}, text)];  // unlike h(), replaceChildren prints a missing link as "undefined"
+  if (link) kids.push(h('a', { href: link.href, target: '_blank', rel: 'noopener' }, link.text));
+  toastEl.replaceChildren(...kids);
   toastEl.classList.add('on');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toastEl.classList.remove('on'), link ? 7000 : 3500);
@@ -145,6 +177,94 @@ function tag(text, iconName) {
   return h('span', { class: 'tag' }, iconName && icon(iconName), text);
 }
 
+// A card that starts folded, for detail most visits skip. It stays as you left it while you move around the app.
+function foldCard(key, title, note, ...kids) {
+  return h('section', { class: 'card fold' },
+    h('details', { open: !!state.folds[key], ontoggle: (e) => { state.folds[key] = e.currentTarget.open; } },
+      h('summary', {}, h('h2', {}, title), h('span', { class: 'fold-note' }, note, icon('chevron'))), kids));
+}
+
+// A sideways-scrolling chip row keeps the pressed chip on screen without scrolling the page.
+function showPressed(chips) {
+  requestAnimationFrame(() => {
+    const b = chips.querySelector('[aria-pressed="true"]');
+    if (!b) return;
+    const c = chips.getBoundingClientRect(), r = b.getBoundingClientRect();
+    if (r.left < c.left || r.right > c.right) chips.scrollLeft += r.left - c.left - (c.width - r.width) / 2;
+  });
+}
+
+// --- transactions, shared by Today, Spending and the Transactions screen
+
+// A selection is {period} or {period: 'custom', start, end}, plus optional q, category and merchant filters.
+// merchant matches the name exactly, as Top merchants groups; q is a search.
+function txnQuery(sel) {
+  const p = new URLSearchParams();
+  if (sel.period === 'custom') { p.set('start', sel.start); p.set('end', sel.end); } else p.set('period', sel.period);
+  for (const key of ['q', 'category', 'merchant']) if (sel[key]) p.set(key, sel[key]);
+  return p;
+}
+const txnHash = (sel) => '#transactions?' + txnQuery(sel);
+
+// Money in shows with a plus. Money out that isn't spending (a transfer, a card payment) says so, so the
+// list adds up to the total above it.
+function txnRow(t) {
+  const out = t.amount_cents > 0;
+  const skipped = out && t.spending === false;
+  return h('li', { class: `row${skipped ? ' not-spending' : ''}` },
+    h('div', { class: 'row-main' },
+      h('div', { class: 'row-title' }, t.merchant_name || t.name),
+      h('div', { class: 'row-sub' }, h('span', {}, categoryLabel(t.category) + (t.account_mask ? ` · …${t.account_mask}` : '')),
+        t.pending && tag('Pending'), skipped && tag('Not spending'))),
+    h('div', { class: `row-amt${out ? '' : ' amt-in'}` }, out ? money(t.amount_cents) : '+' + money(-t.amount_cents)));
+}
+function txnRows(txns) {
+  const out = [];
+  let day = null;
+  for (const t of txns) {
+    if (t.date !== day) { day = t.date; out.push(h('li', { class: 'day-head' }, fmtDay(day))); }
+    out.push(txnRow(t));
+  }
+  return out;
+}
+
+// Period chips, and Custom, which opens two date fields. onPick gets the new selection's period and dates.
+// sel.start and sel.end are the dates on show, so Custom starts from them.
+function periodPicker(sel, { hasPay, onPick }) {
+  const today = isoOf(todayDate());
+  const from = h('input', { type: 'date', name: 'start', value: sel.start || today, max: today });
+  const to = h('input', { type: 'date', name: 'end', value: sel.end || today, max: today });
+  const note = h('p', { class: 'sub', role: 'status' });
+  const dates = h('div', { class: 'range', hidden: sel.period !== 'custom' },
+    h('div', { class: 'field-row' }, field('From', from), field('To', to)), note);
+  const pickDates = () => {
+    const ok = from.value && to.value && from.value <= to.value;
+    note.textContent = ok ? '' : 'Pick a From date on or before the To date.';
+    if (ok) onPick({ period: 'custom', start: from.value, end: to.value });
+  };
+  from.addEventListener('change', pickDates);
+  to.addEventListener('change', pickDates);
+  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Period' },
+    PERIODS.filter(([key]) => hasPay || key !== 'pay_period').map(([key, label]) => h('button', {
+      class: 'chip', type: 'button', 'aria-pressed': String(key === sel.period), 'data-key': key,
+      onclick: () => {
+        for (const b of chips.children) b.setAttribute('aria-pressed', String(b.dataset.key === key));
+        dates.hidden = key !== 'custom';
+        if (key === 'custom') pickDates(); else onPick({ period: key });
+      },
+    }, label)));
+  showPressed(chips);
+  return h('div', { class: 'picker' }, chips, dates);
+}
+
+// Back to the screen you came from, where you left it. Opened straight from a link, it goes to Spending.
+function backButton() {
+  const to = state.from && state.from !== state.screen ? state.from : null;
+  return h('button', { class: 'back', type: 'button',
+    onclick: () => { if (to) { state.restore = true; history.back(); } else location.hash = '#spending'; } },
+  icon('back'), TITLES[to || 'spending']);
+}
+
 function setSynced(iso) {
   if (!iso) { syncedEl.replaceChildren('Not synced yet'); return; }
   const stale = Date.now() - new Date(iso) > STALE_HOURS * 36e5;
@@ -160,129 +280,295 @@ async function screenToday() {
   let hero;
   if (sts.status !== 'ok') {
     hero = card(null,
-      h('p', { class: 'hero-label' }, 'Safe to spend'),
+      h('p', { class: 'hero-label' }, 'Left to spend today'),
       h('p', { class: 'hero' }, '—'),
       h('p', { class: 'hero-sub' }, `Add your ${sts.missing.join(' and ')} to the plan to see this.`),
       h('p', {}, h('a', { class: 'btn primary', href: '#plan' }, 'Open plan')));
   } else {
-    const short = sts.available_cents < 0;
-    hero = card(null,
-      h('p', { class: 'hero-label' }, 'Safe to spend per day'),
-      h('p', { class: 'hero' }, money(short ? 0 : sts.per_day_cents)),
-      h('p', { class: 'hero-sub' }, `until payday ${fmtDay(sts.payday)} · ${plural(sts.days, 'day')}`),
-      short && h('p', {}, statusLine('critical', `Short ${money(-sts.available_cents)} before payday`)),
-      h('details', {},
-        h('summary', {}, 'How this is worked out'),
-        h('ul', { class: 'calc' },
-          sts.lines.map((l) => h('li', {}, h('span', {}, l.label), h('span', {}, signed(l.amount_cents)))),
-          h('li', { class: 'total' }, h('span', {}, `Left until payday, ÷ ${plural(sts.days, 'day')}`), h('span', {}, money(sts.available_cents)))),
-        sts.bills.length > 0 && h('p', { class: 'sub' }, 'Bills before payday: ' +
-          sts.bills.map((b) => `${b.name} ${money(b.amount_cents)} (${fmtShort(b.due)})`).join(', '))));
+    hero = allowanceCard(sts);
   }
-
-  const attention = card('Needs attention',
-    d.alerts.length === 0
-      ? statusLine('good', 'All clear')
-      : d.alerts.map((a) => {
-        const [kind, label] = LEVEL[a.level] || LEVEL.info;
-        return h('div', { class: `alert st-${kind}` }, icon(kind),
-          h('div', {}, h('div', { class: 'alert-level' }, label), h('div', { class: 'alert-title' }, a.title),
-            h('div', { class: 'alert-detail' }, a.detail)));
-      }));
-
-  const spent = card(null, h('ul', { class: 'rows' },
-    h('li', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, 'Spent today')),
-      h('div', { class: 'row-amt' }, money(d.spent_today_cents)),
-      h('a', { class: 'btn small', href: '#spending', onclick: () => setPeriod('today') }, 'Details'))));
 
   const next = card('Coming up',
     d.next_bills.length === 0
       ? h('p', { class: 'empty' }, 'No bills in the next 35 days.')
       : h('ul', { class: 'rows' }, d.next_bills.map(billRow)),
-    h('p', {}, h('a', { href: '#bills' }, 'All bills')));
-  return [hero, attention, spent, next];
+    h('p', {}, h('a', { href: '#bills' }, 'Calendar and all bills')));
+
+  const out = [hero, spentCard(d.spent), attentionCard(d.alerts, d.alerts_dismissed), recentCard(d.recent, d.spent.at(-1), d.date),
+    next].filter(Boolean);
+  if (d.tips.length) {
+    out.push(card('Tips', d.tips.slice(0, 3).map((t) => h('div', { class: 'alert st-info' }, icon('info'),
+      h('div', {}, h('div', { class: 'alert-title' }, t.title), h('div', { class: 'alert-detail' }, t.detail))))));
+  }
+  return out;
+}
+
+// Today, this week and the pay period so far (this month without a pay schedule). Each opens its transactions.
+function spentCard(spent) {
+  return card('Spent', h('div', { class: 'tiles' }, spent.map((p) =>
+    h('a', { class: 'tile', href: txnHash({ period: p.period }) },
+      h('span', { class: 'tile-label' }, SPENT_LABEL[p.period], icon('right')),
+      h('span', { class: 'tile-amt' }, compact(p.total_cents)),
+      h('span', { class: 'tile-sub' }, p.period === 'today' ? fmtShort(p.start) : `since ${fmtShort(p.start)}`)))));
+}
+
+// All transactions opens the pay period (or month), or, early in one, the dates back to the oldest row shown here,
+// so it never lists fewer than this card.
+function recentCard(recent, longest, today) {
+  const oldest = recent.at(-1)?.date;
+  const sel = !oldest || longest.start <= oldest ? { period: longest.period } : { period: 'custom', start: oldest, end: today };
+  return card('Recent transactions',
+    recent.length ? h('ul', { class: 'rows' }, txnRows(recent)) : h('p', { class: 'empty' }, 'No transactions yet.'),
+    h('a', { class: 'link-row', href: txnHash(sel) }, 'All transactions', icon('right')));
+}
+
+// A fresh launch, or coming back after a long break, starts folded; it stays as you left it while you move around the
+// app. Folded, the row still says how many and whether any is urgent. What's dismissed lives on the server, so the phone and the computer agree.
+function attentionCard(alerts, dismissed) {
+  let node;
+  const change = async (btn, opts) => {
+    btn.disabled = true;
+    try {
+      const r = await api('/api/alerts/dismissed', opts);
+      // Bring back shows what came back; an emptied list folds, so the next new alert doesn't arrive open.
+      state.attentionOpen = r.alerts.length > 0 && (state.attentionOpen || opts.method === 'DELETE');
+      const next = attentionCard(r.alerts, r.dismissed_count);
+      if (next) {
+        node.replaceWith(next);
+        next.querySelector('summary, button')?.focus({ preventScroll: true });
+      } else {
+        node.remove();
+      }
+    } catch (e) {
+      btn.disabled = false;
+      toast('Could not update the list: ' + e.message);
+    }
+  };
+  const restoreButton = (text) => h('button', { class: 'link-btn', type: 'button', onclick: (e) => change(e.currentTarget, { method: 'DELETE' }) }, text);
+  if (alerts.length === 0) {
+    if (dismissed === 0) return null;
+    node = h('p', { class: 'attention-quiet' }, `${plural(dismissed, 'alert')} dismissed`, restoreButton('Bring back'));
+    return node;
+  }
+  const count = (level) => alerts.filter((a) => a.level === level).length;
+  const [urgent, warn, info] = ['urgent', 'warn', 'info'].map(count);
+  const label = urgent || info
+    ? [urgent && `${urgent} urgent`, warn && `${warn} to check`, info && `${info} FYI`].filter(Boolean).join(', ')
+    : `${plural(warn, 'thing')} to check`;
+  const worst = LEVEL_ICON[alerts[0].level] || 'info';  // the API sorts most urgent first
+  node = h('section', { class: 'card attention', 'aria-label': 'Needs attention' },
+    h('details', { open: state.attentionOpen, ontoggle: (e) => { state.attentionOpen = e.currentTarget.open; } },
+      h('summary', {}, h('span', { class: `attention-label st-${worst}` }, icon(worst), label), icon('chevron')),
+      alerts.map((a) => h('div', { class: 'alert' },
+        h('div', {}, a.level === 'urgent' && statusLine(LEVEL_ICON.urgent, 'Urgent'), h('div', { class: 'alert-title' }, a.title),
+          h('div', { class: 'alert-detail' }, a.detail)),
+        h('button', { class: 'alert-x', type: 'button', 'aria-label': `Remove: ${a.title}`,
+          onclick: (e) => change(e.currentTarget, { method: 'PUT', body: JSON.stringify({ id: a.id }) }) }, icon('close')))),
+      dismissed > 0 && h('p', { class: 'attention-restore' }, restoreButton(`Bring back ${dismissed} dismissed`))));
+  return node;
+}
+
+// Today's share of what's left until payday, and how much of it is gone. Bills, the card and the buffer
+// are already taken out, so this is the money for everything else.
+function allowanceCard(sts) {
+  const short = sts.available_cents < 0;
+  const left = sts.left_today_cents;
+  const spent = Math.max(sts.spent_today_cents, 0);
+  const allowance = Math.max(sts.allowance_cents, 0);
+  const over = !short && left < 0;
+
+  const fill = h('div', { class: `gauge-fill${over ? ' over' : ''}` });
+  fill.style.width = `${allowance ? Math.min(100, (100 * spent) / allowance) : spent ? 100 : 0}%`;
+  const gauge = h('div', { class: 'gauge', role: 'img', 'aria-label': `${money(spent)} spent of ${money(allowance)} today` }, fill);
+
+  return card(null,
+    h('p', { class: 'hero-label' }, 'Left to spend today'),
+    h('p', { class: 'hero' }, money(short ? 0 : left)),
+    !short && [gauge,
+      h('div', { class: 'gauge-legend' },
+        h('a', { href: txnHash({ period: 'today' }) }, `${money(spent)} spent`),
+        h('span', {}, `of ${money(allowance)} today`)),
+      // Today's transactions, and the Spent tile, count a bill payment as spending; this share doesn't.
+      sts.bills_paid_today_cents > 0 && h('p', { class: 'sub bills-note' },
+        `Plus ${money(sts.bills_paid_today_cents)} of bills paid today, already set aside.`)],
+    over && h('p', {}, statusLine('warning', `${money(-left)} over today. Tomorrow's share shrinks to cover it.`)),
+    short
+      ? h('p', {}, statusLine('critical', `Short ${money(-sts.available_cents)} before payday`))
+      : h('p', { class: 'hero-sub' }, `${money(sts.allowance_cents)} a day until payday, ${fmtShort(sts.payday)} (${plural(sts.days, 'day')})`),
+    h('details', {},
+      h('summary', {}, 'How this is worked out'),
+      h('p', { class: 'sub calc-note' }, 'Bills due before payday, your card balance and your buffer are already out. This covers everything else: groceries, eating out, gas, fun.'),
+      h('ul', { class: 'calc' },
+        sts.lines.map((l) => h('li', {}, h('span', {}, l.label), h('span', {}, signed(l.amount_cents)))),
+        h('li', { class: 'total' }, h('span', {}, 'Left until payday'), h('span', {}, money(sts.available_cents))),
+        spent > 0 && h('li', {}, h('span', {}, 'Plus spent today'), h('span', {}, signed(spent))),
+        h('li', { class: 'total' }, h('span', {}, `÷ ${plural(sts.days, 'day')} = today's share`), h('span', {}, money(sts.allowance_cents)))),
+      sts.bills.length > 0 && h('p', { class: 'sub' }, 'Bills before payday: ' +
+        sts.bills.map((b) => `${b.name} ${money(b.amount_cents)} (${fmtShort(b.due)})`).join(', '))));
 }
 
 // --- Spending
 
-function setPeriod(p) { state.period = p; store('period', p); }
+// The chosen period is remembered on the phone; Custom remembers its dates too.
+function setPeriod(sel) {
+  state.period = sel.period; store('period', sel.period);
+  if (sel.period === 'custom') {
+    state.range = { start: sel.start, end: sel.end };
+    store('spendStart', sel.start); store('spendEnd', sel.end);
+  }
+}
 
 async function screenSpending() {
-  const p = state.period;
-  const d = await api('/api/spending?period=' + p);
+  const asked = state.period === 'custom' ? { period: 'custom', ...state.range } : { period: state.period };
+  let d;
+  try {
+    d = await api('/api/spending?' + txnQuery(asked));
+  } catch (e) {
+    if (e.status !== 400) throw e;
+    setPeriod({ period: 'month' });  // the pay period lost its pay schedule, or the saved dates are no good
+    d = await api('/api/spending?period=month');
+  }
   setSynced(d.last_synced_at);
-  const info = PERIOD_INFO[p];
-  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Period' },
-    PERIODS.map(([key, label]) => h('button', {
-      class: 'chip', type: 'button', 'aria-pressed': String(key === p),
-      onclick: () => { setPeriod(key); render(); },
-    }, label)));
-  // The row scrolls sideways at phone width; keep the chosen period on screen.
-  requestAnimationFrame(() => chips.querySelector('[aria-pressed="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
+  const p = state.period, info = PERIOD_INFO[p];
+  const view = p === 'custom' ? { period: 'custom', start: d.start, end: d.end } : { period: p };
+  const picker = periodPicker({ period: p, start: d.start, end: d.end },
+    { hasPay: !!d.payday, onPick: (sel) => { setPeriod(sel); render(); } });
 
   const change = d.change_cents;
   const hero = card(null,
     h('p', { class: 'hero-label' }, info.title),
     h('p', { class: 'hero' }, money(d.total_cents)),
-    h('p', { class: 'hero-sub' }, `${change > 0 ? '↑' : change < 0 ? '↓' : ''} ${money(Math.abs(change))} vs ${money(d.previous.total_cents)} ${info.prev}`.trim()));
+    h('p', { class: 'hero-sub' }, `${change > 0 ? '↑' : change < 0 ? '↓' : ''} ${money(Math.abs(change))} vs ${money(d.previous.total_cents)} ${info.prev}`.trim()),
+    p !== 'today' && h('p', { class: 'sub range-note' }, fmtRange(d.start, d.end)),
+    h('a', { class: 'link-row', href: txnHash(view) }, 'See transactions', icon('right')));
 
-  const out = [chips, hero];
+  const out = [picker, hero];
   if (info.series) {
     out.push(card('Running total',
       lineChart([
         { label: info.series[0], color: 's1', points: d.trend.current },
         { label: info.series[1], color: 's2', points: d.trend.previous },
-      ])));
+      ], { title: 'Running total' })));
   }
   const monthly = p === 'month' || p === 'last_month';
   out.push(card('By category', d.by_category.length
-    ? categoryBars(d.by_category, monthly ? d.targets_cents : {})
+    ? categoryBars(d.by_category, monthly ? d.targets_cents : {}, (c) => txnHash({ ...view, category: c.category }))
     : h('p', { class: 'empty' }, 'No spending in this period.')));
+  // Detail most visits skip starts folded.
   if (d.by_merchant.length) {
-    out.push(card('Top merchants', h('ul', { class: 'rows' },
-      d.by_merchant.slice(0, 8).map((m) => row(m.merchant, plural(m.count, 'charge'), money(m.total_cents))))));
+    const n = d.by_merchant.length;
+    out.push(foldCard('merchants', 'Top merchants', n > TOP_MERCHANTS ? `Top ${TOP_MERCHANTS} of ${n}` : plural(n, 'merchant'),
+      h('ul', { class: 'rows' }, d.by_merchant.slice(0, TOP_MERCHANTS).map((m) =>
+        linkRow(txnHash({ ...view, merchant: m.merchant }), m.merchant, plural(m.count, 'charge'), money(m.total_cents)))),
+      n > TOP_MERCHANTS && h('a', { class: 'link-row', href: txnHash(view) }, 'All transactions', icon('right'))));
   }
   if (d.unusual.length) {
-    out.push(card('Flagged in the last 2 weeks', h('ul', { class: 'rows' },
+    out.push(foldCard('flagged', 'Flagged, last 2 weeks', String(d.unusual.length), h('ul', { class: 'rows' },
       d.unusual.map((u) => row(u.merchant, [statusLine('warning', u.detail), fmtShort(u.date)], money(u.amount_cents))))));
   }
-  out.push(card('Transactions', transactionList(d.transactions)));
   return out;
 }
 
-function transactionList(txns) {
-  const list = h('div', {});
-  let shown = 60;
-  const search = h('input', {
-    type: 'search', name: 'q', placeholder: 'Search merchants…', 'aria-label': 'Search transactions', autocomplete: 'off',
-    oninput: () => { shown = 60; draw(); },
-  });
-  function draw() {
-    const q = search.value.trim().toLowerCase();
-    const rows = q ? txns.filter((t) => `${t.merchant_name || ''} ${t.name || ''}`.toLowerCase().includes(q)) : txns;
-    const kids = [];
-    let day = null;
-    for (const t of rows.slice(0, shown)) {
-      if (t.date !== day) { day = t.date; kids.push(h('div', { class: 'day-head' }, fmtDay(day))); }
-      const out = t.amount_cents > 0;
-      kids.push(h('div', { class: 'row' },
-        h('div', { class: 'row-main' },
-          h('div', { class: 'row-title' }, t.merchant_name || t.name),
-          h('div', { class: 'row-sub' }, `${categoryLabel(t.category)} · …${t.account_mask}`, t.pending && tag('Pending'))),
-        h('div', { class: `row-amt${out ? '' : ' amt-in'}` }, out ? money(t.amount_cents) : '+' + money(-t.amount_cents))));
-    }
-    if (!rows.length) kids.push(h('p', { class: 'empty' }, q ? 'No matches.' : 'No transactions.'));
-    if (rows.length > shown) {
-      kids.push(h('p', {}, h('button', { class: 'btn small', type: 'button', onclick: () => { shown += 100; draw(); } },
-        `Show more (${rows.length - shown} left)`)));
-    }
-    list.replaceChildren(...kids);
-  }
-  draw();
-  return [search, list];
+// A row that opens somewhere: the title is the link, and the whole row is its tap target.
+function linkRow(href, title, sub, amount) {
+  const r = row(h('a', { class: 'stretch', href }, title), sub, amount);
+  r.classList.add('row-link');
+  r.append(icon('right'));
+  return r;
 }
 
-function categoryBars(cats, targets) {
+// --- Transactions: any period, searchable, and what the spending among them adds up to
+
+function selFrom(params) {
+  const start = params.get('start'), end = params.get('end');
+  return { ...(start && end ? { period: 'custom', start, end } : { period: params.get('period') || 'month' }),
+    q: params.get('q') || '', category: params.get('category') || '', merchant: params.get('merchant') || '' };
+}
+
+async function screenTransactions(params) {
+  let sel = selFrom(params);
+  const fetchSel = (x) => api('/api/transactions?' + txnQuery(x) + '&limit=' + MAX_ROWS);
+  let d;
+  try {
+    d = await fetchSel(sel);
+  } catch (e) {
+    if (e.status !== 400) throw e;
+    toast(`Showing this month: ${e.message}`);  // a link from before the pay schedule went, or hand-typed dates
+    sel = { ...sel, period: 'month', start: undefined, end: undefined };
+    d = await fetchSel(sel);
+    history.replaceState(history.state, '', txnHash(sel));
+  }
+  setSynced(d.last_synced_at);
+  state.view = sel;
+
+  const summary = h('section', { class: 'card' });
+  const list = h('ul', { class: 'rows' });
+  const more = h('div', {});
+  let shown = PAGE, seq = 0, timer;
+
+  function draw() {
+    const info = PERIOD_INFO[sel.period];
+    const left = d.transactions.length - shown;
+    // replaceChildren, unlike h(), would print a skipped `false` as text, hence the filters
+    const filters = [
+      sel.category && [categoryLabel(sel.category), { category: '' }],
+      sel.merchant && [sel.merchant, { merchant: '' }],
+    ].filter(Boolean);
+    summary.replaceChildren(...[
+      filters.length > 0 && h('p', { class: 'filters' }, filters.map(([label, off]) =>
+        h('button', { class: 'filter', type: 'button', 'aria-label': `Show all, not just ${label}`,
+          onclick: () => load({ ...sel, ...off }) }, h('span', {}, label), icon('close')))),
+      h('p', { class: 'hero-label' }, info.title),
+      h('p', { class: 'hero' }, money(d.spent_cents)),
+      h('p', { class: 'hero-sub' }, `${plural(d.count, 'transaction')} · ${fmtRange(d.start, d.end)}`),
+      d.count > d.transactions.length && h('p', { class: 'sub' },
+        `Showing the newest ${d.transactions.length.toLocaleString('en-US')}. Pick fewer days to see the rest.`),
+    ].filter(Boolean));
+    list.replaceChildren(...txnRows(d.transactions.slice(0, shown)));
+    more.replaceChildren(...[
+      !d.transactions.length && h('p', { class: 'empty' }, sel.q || sel.category || sel.merchant ? 'Nothing matches.' : 'No transactions in these dates.'),
+      left > 0 && h('p', {}, h('button', { class: 'btn small', type: 'button', onclick: () => { shown += PAGE; draw(); } },
+        `Show more (${left.toLocaleString('en-US')} left)`)),
+    ].filter(Boolean));
+  }
+
+  // A new period, search or filter refetches just the results and keeps the address in step, so Back,
+  // a sync or Ask Claude sees the same selection.
+  async function load(next) {
+    if (!list.isConnected) return;  // left the screen while a search was waiting
+    sel = next;
+    state.view = sel;
+    history.replaceState(history.state, '', txnHash(sel));
+    const mine = ++seq;
+    main.classList.add('loading');
+    try {
+      const r = await fetchSel(sel);
+      if (mine !== seq) return;
+      d = r; shown = PAGE; draw();
+    } catch (e) {
+      if (mine === seq) toast('Could not load: ' + e.message);
+    } finally {
+      if (mine === seq && list.isConnected) main.classList.remove('loading');  // else a newer render owns it
+    }
+  }
+
+  const search = h('input', { type: 'search', name: 'q', value: sel.q, placeholder: 'Search merchants…',
+    'aria-label': 'Search transactions', autocomplete: 'off', enterkeyhint: 'search' });
+  search.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => load({ ...sel, q: search.value.trim() }), 250);
+  });
+  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') search.blur(); });  // puts the keyboard away
+
+  draw();
+  return [backButton(),
+    periodPicker({ ...sel, start: d.start, end: d.end },
+      { hasPay: !!d.payday, onPick: (p) => load({ ...sel, ...p }) }),
+    summary,
+    h('section', { class: 'card' }, search, list, more)];
+}
+
+function categoryBars(cats, targets, linkFor) {
   const max = Math.max(...cats.map((c) => Math.max(c.total_cents, targets[c.category] || 0)), 1);
   return h('ul', { class: 'bars' }, cats.map((c) => {
     const target = targets[c.category];
@@ -295,37 +581,61 @@ function categoryBars(cats, targets) {
       mark.style.left = `calc(${(100 * target) / max}% - 1px)`;
       track.append(mark);
     }
-    return h('li', { class: 'bar-row' },
+    const kids = [
       h('div', { class: 'bar-head' },
-        h('span', { class: 'row-title' }, c.label),
+        h('span', { class: 'row-title' }, c.label, linkFor && icon('right')),
         h('span', {}, h('b', {}, money(c.total_cents)), target != null && h('span', { class: 'sub' }, ` of ${money0(target)}`))),
       track,
-      over && statusLine('warning', `${money0(c.total_cents - target)} over target`));
+      over && statusLine('warning', `${money0(c.total_cents - target)} over target`)];
+    return h('li', { class: 'bar-row' }, linkFor ? h('a', { class: 'bar-link', href: linkFor(c) }, kids) : kids);
   }));
 }
 
-// Cumulative line chart: one hairline crosshair snaps to the nearest day; the tooltip lists every series.
-function lineChart(series) {
-  const W = Math.max(260, main.clientWidth - 64), H = 170, padR = 40, padT = 8, padB = 22;
+// Line chart: one hairline crosshair snaps to the nearest point; the tooltip lists every series.
+// opts: zero (y starts at $0; off for values that never get near it), label (a point's x label),
+// head and rowLabel (the table's first column), band ({low, high, label}: cents per point, shaded around
+// the first series), legend (false for a single series the card title already names), title (names the
+// larger view), and for that view: sheet, width and height.
+function lineChart(series, opts = {}) {
+  const { zero = true, label = (p) => fmtShort(p.date), head = 'Day', rowLabel = (p, i) => i + 1, band = null,
+    legend: showLegend = true, title = 'Chart', sheet = false } = opts;
+  const W = Math.round(opts.width || Math.max(260, main.clientWidth - 64)), H = Math.round(opts.height || 170);
+  const padR = 40, padT = 8, padB = 22;
   const n = Math.max(...series.map((x) => x.points.length));
   const plotW = W - padR, plotH = H - padT - padB;
-  const maxV = Math.max(...series.flatMap((x) => x.points.map((p) => p.total_cents / 100)), 1);
-  const raw = maxV / 3, pow = 10 ** Math.floor(Math.log10(raw)), m = raw / pow;
+  const values = [...series.flatMap((x) => x.points.map((p) => p.total_cents / 100)),
+    ...(band ? [...band.low, ...band.high].map((c) => c / 100) : [])];
+  const maxV = Math.max(...values, 1);
+  const minV = zero ? 0 : Math.min(...values);
+  const ticks = Math.max(3, Math.min(6, Math.round(plotH / 70)));  // a taller chart gets more gridlines
+  const raw = (maxV - minV || maxV) / ticks, pow = 10 ** Math.floor(Math.log10(raw)), m = raw / pow;
   const step = (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow;
   const top = Math.ceil(maxV / step) * step;
+  const bottom = Math.min(Math.floor(minV / step) * step, top - step);  // a flat line on a step still gets a band
   const x = (i) => (n === 1 ? plotW / 2 : (i * plotW) / (n - 1));
-  const y = (v) => padT + plotH - (v / top) * plotH;
+  const y = (v) => padT + plotH - ((v - bottom) / (top - bottom)) * plotH;
 
   const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', tabindex: '0',
     'aria-label': series.map((x) => `${x.label}: ${money(x.points.at(-1)?.total_cents ?? 0)}`).join('; ') + '. Use arrow keys for each day.' });
-  for (let v = 0; v <= top + 1e-9; v += step) {
-    svg.append(s('line', { class: v === 0 ? 'baseline' : 'gridline', x1: 0, x2: plotW, y1: y(v), y2: y(v) }),
+  for (let v = bottom; v <= top + 1e-9; v += step) {
+    svg.append(s('line', { class: v === bottom ? 'baseline' : 'gridline', x1: 0, x2: plotW, y1: y(v), y2: y(v) }),
       s('text', { x: W, y: y(v) + 4, 'text-anchor': 'end' }, short$(v)));
   }
   const dates = series[0].points;
   if (dates.length) {
-    svg.append(s('text', { x: 0, y: H - 4 }, fmtShort(dates[0].date)),
-      s('text', { x: x(dates.length - 1), y: H - 4, 'text-anchor': dates.length - 1 > n * 0.8 ? 'end' : 'middle' }, fmtShort(dates.at(-1).date)));
+    svg.append(s('text', { x: 0, y: H - 4 }, label(dates[0])),
+      s('text', { x: x(dates.length - 1), y: H - 4, 'text-anchor': dates.length - 1 > n * 0.8 ? 'end' : 'middle' }, label(dates.at(-1))));
+    // The larger view has room for dates in between, kept clear of the two ends.
+    const between = sheet ? Math.floor(x(dates.length - 1) / 110) - 1 : 0;
+    for (let k = 1; k <= between; k++) {
+      const i = Math.round((k * (dates.length - 1)) / (between + 1));
+      svg.append(s('text', { x: x(i), y: H - 4, 'text-anchor': 'middle' }, label(dates[i])));
+    }
+  }
+  if (band) {
+    const upper = band.high.map((c, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(c / 100).toFixed(1)}`).join('');
+    const lower = band.low.map((c, i) => `L${x(i).toFixed(1)},${y(c / 100).toFixed(1)}`).reverse().join('');
+    svg.append(s('path', { class: 'band', fill: `var(--${series[0].color})`, d: upper + lower + 'Z' }));
   }
   // Draw the comparison first so the current period sits on top.
   for (const ser of [...series].reverse()) {
@@ -354,8 +664,9 @@ function lineChart(series) {
       if (!p) return;
       dots[k].setAttribute('cx', x(idx)); dots[k].setAttribute('cy', y(p.total_cents / 100));
       const key = h('span', { class: 'key-line' }); key.style.background = `var(--${ser.color})`;
-      rows.push(h('div', {}, key, h('b', {}, money(p.total_cents)), h('span', { class: 'tip-date' }, `${ser.label} · ${fmtShort(p.date)}`)));
+      rows.push(h('div', {}, key, h('b', {}, money(p.total_cents)), h('span', { class: 'tip-date' }, `${ser.label} · ${label(p)}`)));
     });
+    if (band) rows.push(h('div', { class: 'tip-date' }, `${band.label}: ${money0(band.low[idx])} to ${money0(band.high[idx])}`));
     tip.replaceChildren(...rows);
     tip.classList.add('on');
     const scale = wrap.clientWidth / W;
@@ -370,26 +681,132 @@ function lineChart(series) {
     const r = svg.getBoundingClientRect();
     show(Math.round((((e.clientX - r.left) / r.width) * W / plotW) * (n - 1)));
   }
-  hit.addEventListener('pointerdown', fromPointer);
-  hit.addEventListener('pointermove', fromPointer);
-  svg.addEventListener('pointerleave', hide);
-  svg.addEventListener('blur', hide);
+  // Capture keeps the crosshair on the finger even when it slides off the chart's edge.
+  hit.addEventListener('pointerdown', (e) => { svg.setPointerCapture?.(e.pointerId); fromPointer(e); });
+  svg.addEventListener('pointermove', (e) => { if (idx >= 0 || e.pointerType === 'mouse') fromPointer(e); });
+  if (!sheet) {
+    // On the page, a vertical swipe hands the touch to scrolling (pointercancel), and the reading goes with it.
+    // In the larger view the reading stays put until the next touch.
+    svg.addEventListener('pointerleave', hide);
+    svg.addEventListener('pointercancel', hide);
+    svg.addEventListener('blur', hide);
+  }
+  wrap.addEventListener('contextmenu', (e) => e.preventDefault());  // a long press scrubs; it never opens a menu
   svg.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
       e.preventDefault();
       show(idx < 0 ? n - 1 : idx + (e.key === 'ArrowRight' ? 1 : -1));
-    } else if (e.key === 'Escape') hide();
+    } else if (e.key === 'Escape' && !sheet) hide();
   });
 
-  const legend = h('div', { class: 'legend' }, series.map((ser) => {
+  const legend = showLegend && h('div', { class: 'legend' }, series.map((ser) => {
     const key = h('span', { class: 'key-line' }); key.style.background = `var(--${ser.color})`;
     return h('span', {}, key, ser.label, h('b', {}, money(ser.points.at(-1)?.total_cents ?? 0)));
   }));
+  if (sheet) {
+    requestAnimationFrame(() => { if (n) show(n - 1); });  // open on the latest reading
+    return [legend, wrap].filter(Boolean);
+  }
+  const expand = h('button', { class: 'icon-btn expand', type: 'button', 'aria-label': `Open ${title} larger`,
+    onclick: () => openChartSheet(series, { ...opts, title }, expand) }, icon('expand'));
+  const chartHead = h('div', { class: 'chart-head' }, legend || h('span', {}), expand);
   const table = h('details', { class: 'table-view' }, h('summary', {}, 'Show as table'),
-    h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Day'), series.map((ser) => h('th', {}, ser.label)))),
-      h('tbody', {}, Array.from({ length: n }, (_, i) => h('tr', {}, h('td', {}, i + 1),
-        series.map((ser) => h('td', {}, ser.points[i] ? money0(ser.points[i].total_cents) : '')))))));
-  return [legend, wrap, table];
+    h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, head), series.map((ser) => h('th', {}, ser.label)),
+      band && [h('th', {}, 'Low'), h('th', {}, 'High')])),
+      h('tbody', {}, Array.from({ length: n }, (_, i) => h('tr', {}, h('td', {}, rowLabel(series[0].points[i], i)),
+        series.map((ser) => h('td', {}, ser.points[i] ? money0(ser.points[i].total_cents) : '')),
+        band && [h('td', {}, money0(band.low[i])), h('td', {}, money0(band.high[i]))])))));
+  return [chartHead, wrap, table];
+}
+
+// The same chart as large as the screen allows, in a sheet that slides up from the bottom and leaves the
+// same way: the close button, Escape, a tap above it, or a pull down on its top edge.
+function openChartSheet(series, opts, opener) {
+  const close = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close' }, icon('close'));
+  const head = h('div', { class: 'sheet-head' },
+    h('span', { class: 'grabber', 'aria-hidden': 'true' }), h('h2', { id: 'sheet-title' }, opts.title), close);
+  const body = h('div', { class: 'sheet-body' });
+  const sheet = h('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'sheet-title' }, head, body);
+  const backdrop = h('div', { class: 'backdrop' });
+  const behind = [document.querySelector('header.top'), main, document.querySelector('nav.tabs')].filter(Boolean);
+  document.body.append(backdrop, sheet);
+  behind.forEach((el) => { el.inert = true; });
+
+  // Fill the sheet: its height less the legend and the reading above the plot. A legend that wraps
+  // to more lines than guessed is measured and the chart drawn again to fit.
+  function draw(legendH = opts.legend === false ? 0 : 32) {
+    const height = Math.max(150, Math.min(body.clientHeight - legendH - 72 - 8, 640));
+    body.replaceChildren(...lineChart(series, { ...opts, sheet: true, width: body.clientWidth, height }));
+    const legend = body.querySelector('.legend');
+    const actual = legend ? legend.offsetHeight + 8 : 0;
+    if (actual > legendH) draw(actual);
+  }
+  let frame = 0;
+  const onResize = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(() => draw()); };
+  const onKey = (e) => { if (e.key === 'Escape') shut(); };
+
+  let open = true;
+  function shut() {
+    if (!open) return;
+    open = false;
+    window.removeEventListener('resize', onResize);
+    window.removeEventListener('hashchange', shut);
+    document.removeEventListener('keydown', onKey);
+    behind.forEach((el) => { el.inert = false; });
+    sheet.classList.remove('on');
+    backdrop.classList.remove('on');
+    let gone = false;
+    const remove = () => { if (!gone) { gone = true; sheet.remove(); backdrop.remove(); } };
+    sheet.addEventListener('transitionend', (e) => { if (e.target === sheet) remove(); });
+    setTimeout(remove, 500);  // no transition runs under reduced motion or in a background tab
+    if (opener?.isConnected) opener.focus({ preventScroll: true });
+  }
+
+  // Pull down on the top edge: the sheet follows the finger, and a long or quick pull closes it.
+  let drag = null;
+  head.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button')) return;
+    head.setPointerCapture(e.pointerId);
+    drag = { y0: e.clientY, dy: 0, trail: [{ y: e.clientY, t: e.timeStamp }] };
+    sheet.classList.add('dragging');
+    backdrop.classList.add('dragging');
+  });
+  head.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    drag.dy = e.clientY - drag.y0;
+    drag.trail.push({ y: e.clientY, t: e.timeStamp });
+    if (drag.trail.length > 5) drag.trail.shift();
+    const room = sheet.offsetHeight;
+    const dy = drag.dy > 0 ? drag.dy : (drag.dy * room * 0.55) / (room + 0.55 * -drag.dy);  // resists going up
+    sheet.style.transform = `translateY(${dy}px)`;
+    backdrop.style.opacity = String(1 - Math.max(0, dy) / room);
+  });
+  const endDrag = () => {
+    if (!drag) return;
+    const a = drag.trail[0], b = drag.trail.at(-1);
+    const speed = (b.y - a.y) / Math.max(1, b.t - a.t);  // px per ms, down is positive
+    const far = drag.dy;
+    drag = null;
+    sheet.classList.remove('dragging');
+    backdrop.classList.remove('dragging');
+    sheet.style.transform = '';
+    backdrop.style.opacity = '';
+    if (far > 120 || speed > 0.5) shut();
+  };
+  head.addEventListener('pointerup', endDrag);
+  head.addEventListener('pointercancel', endDrag);
+
+  close.addEventListener('click', shut);
+  backdrop.addEventListener('click', shut);
+  window.addEventListener('resize', onResize);
+  window.addEventListener('hashchange', shut);
+  document.addEventListener('keydown', onKey);
+  draw();
+  requestAnimationFrame(() => {
+    sheet.classList.add('on');
+    backdrop.classList.add('on');
+    close.focus({ preventScroll: true });
+  });
 }
 
 // --- Bills
@@ -436,12 +853,78 @@ async function screenBills() {
           ? tag('In plan', 'check')
           : h('button', { class: 'btn small', type: 'button', 'aria-label': `Add ${r.merchant} to plan`, onclick: (e) => addBill(r, e.currentTarget) }, 'Add')))));
 
-  const out = [hero, timeline, recurring];
+  const out = [hero, calendarCard(d.calendar), timeline, recurring];
   if (d.price_flags.length) {
     out.push(card('Price changes', h('ul', { class: 'rows' },
       d.price_flags.map((u) => row(u.merchant, [statusLine('warning', u.detail), fmtShort(u.date)], money(u.amount_cents))))));
   }
   return out;
+}
+
+// A month grid: paydays are squares, bills are dots (hollow once paid), so shape carries the meaning and color
+// only repeats it. Tapping a day lists what lands on it.
+const MONTH_FMT = new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' });
+const WEEKDAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const isoOf = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+
+function calendarCard(events) {
+  const byDay = new Map();
+  for (const e of events) byDay.set(e.date, [...(byDay.get(e.date) || []), e]);
+  const today = todayDate();
+  const todayIso = isoOf(today);
+  let offset = 0;  // 0 = this month, 1 = next
+  let picked = todayIso;
+  const title = h('h2', { class: 'cal-title' });
+  const prev = h('button', { class: 'icon-btn cal-nav', type: 'button', 'aria-label': 'This month', onclick: () => { offset = 0; picked = todayIso; draw(); } }, '‹');
+  const next = h('button', { class: 'icon-btn cal-nav', type: 'button', 'aria-label': 'Next month', onclick: () => { offset = 1; picked = null; draw(); } }, '›');
+  const grid = h('div', { class: 'cal-grid' });
+  const detail = h('div', { class: 'cal-detail', 'aria-live': 'polite' });
+
+  function marker(e) {
+    const cls = e.kind === 'payday' ? 'm-pay' : e.paid ? 'm-paid' : 'm-bill';
+    return h('span', { class: `mark ${cls}` });
+  }
+  function describe(e) {
+    return `${e.kind === 'payday' ? 'Payday' : e.name} ${money0(e.amount_cents)}${e.kind === 'bill' && e.paid ? ' paid' : ''}`;
+  }
+  function draw() {
+    const first = new Date(today.getFullYear(), today.getMonth() + offset, 1);
+    const days = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+    title.textContent = MONTH_FMT.format(first);
+    prev.disabled = offset === 0;
+    next.disabled = offset === 1;
+    const cells = WEEKDAYS.map((w) => h('span', { class: 'cal-wd', 'aria-hidden': 'true' }, w));
+    for (let i = 0; i < first.getDay(); i++) cells.push(h('span', {}));
+    for (let day = 1; day <= days; day++) {
+      const iso = isoOf(new Date(first.getFullYear(), first.getMonth(), day));
+      const evs = byDay.get(iso) || [];
+      const label = `${fmtDay(iso)}${evs.length ? ': ' + evs.map(describe).join(', ') : ''}`;
+      cells.push(h('button', {
+        class: `cal-day${iso === todayIso ? ' today' : ''}${iso < todayIso ? ' past' : ''}`, type: 'button',
+        'aria-label': label, 'aria-pressed': String(iso === picked),
+        onclick: () => { picked = picked === iso ? null : iso; draw(); },
+      }, h('span', { class: 'cal-num' }, day), h('span', { class: 'cal-marks' }, evs.slice(0, 3).map(marker))));
+    }
+    grid.replaceChildren(...cells);
+
+    // The picked day, or the whole month when nothing is picked
+    const monthIso = isoOf(first).slice(0, 7);
+    const shown = picked ? byDay.get(picked) || [] : events.filter((e) => e.date.startsWith(monthIso));
+    const head = picked ? fmtDay(picked) : `All of ${MONTH_FMT.format(first).split(' ')[0]}`;
+    detail.replaceChildren(h('div', { class: 'day-head' }, head), shown.length === 0
+      ? h('p', { class: 'empty' }, picked === todayIso ? 'Nothing due today.' : 'Nothing due.')
+      : h('ul', { class: 'rows' }, shown.map((e) => {
+        const sub = [!picked && fmtShort(e.date), e.kind === 'bill' && e.paid && statusLine('good', 'Paid')].filter(Boolean);
+        return row(h('span', { class: 'cal-row-title' }, marker(e), e.name), sub.length ? sub : null,
+          (e.kind === 'payday' ? '+' : '') + money(e.amount_cents));
+      })));
+  }
+  draw();
+  const legend = h('div', { class: 'legend cal-legend' },
+    h('span', {}, h('span', { class: 'mark m-pay' }), 'Payday'),
+    h('span', {}, h('span', { class: 'mark m-bill' }), 'Bill due'),
+    h('span', {}, h('span', { class: 'mark m-paid' }), 'Paid'));
+  return h('section', { class: 'card' }, h('div', { class: 'cal-head' }, prev, title, next), legend, grid, detail);
 }
 
 async function addBill(r, btn) {
@@ -471,7 +954,7 @@ async function screenMoney() {
     h('p', { class: 'hero-sub' }, `${money0(nw.assets_cents)} in accounts − ${money0(nw.liabilities_cents)} owed on cards`));
 
   const accounts = card('Accounts', h('ul', { class: 'rows' }, d.accounts.map((a) => {
-    const title = `${a.name} …${a.mask}`;
+    const title = a.mask ? `${a.name} …${a.mask}` : a.name;  // accounts typed into data/manual.json have no mask
     if (a.type === 'credit') {
       const used = a.limit_cents ? Math.round((100 * a.owed_cents) / a.limit_cents) : null;
       return row(title, `${a.institution} · credit card`, money(a.owed_cents),
@@ -542,10 +1025,96 @@ async function screenInvesting() {
   const holdings = card('Holdings', h('ul', { class: 'rows' }, d.holdings.map((x) => {
     const gain = x.cost_basis_cents != null ? x.value_cents - x.cost_basis_cents : null;
     const pct = gain != null && x.cost_basis_cents ? ` (${((100 * gain) / x.cost_basis_cents).toFixed(1)}%)` : '';
-    return row(x.ticker || x.name, `${x.name}${x.quantity ? ` · ${+x.quantity.toFixed(4)} sh` : ''}`,
+    // a manual holding is worth its last close, so say which day that was
+    const priced = x.account_key.startsWith('manual:') && (x.updated_at ? `price of ${fmtShort(x.updated_at)}` : 'no price yet');
+    const what = [x.ticker && x.name, x.quantity && `${+x.quantity.toFixed(4)} sh`].filter(Boolean).join(' · ');
+    return row(x.ticker || x.name, [what, priced],
       money0(x.value_cents), gain != null ? `${signed(gain).replace(/\.\d\d$/, '')}${pct}` : null);
   })));
-  return [hero, allocation, left, holdings];
+  return [hero, historyCard(d.history), projectionCard(a.invested_cents, d.contributions_per_year_cents), allocation, left, holdings];
+}
+
+const RANGES = [['1M', 1], ['3M', 3], ['6M', 6], ['1Y', 12]];
+const RANGE_WORDS = { 1: 'the last month', 3: 'the last 3 months', 6: 'the last 6 months', 12: 'the last year' };
+
+// What the shares held today were worth on each past day. It isn't a record of the account (deposits and
+// sales aren't in it), so the card says so.
+function historyCard(hist) {
+  if (hist.points.length < 2) {
+    return card('Value over time', h('p', { class: 'empty' }, 'Needs a few days of prices. They load on the next sync.'));
+  }
+  let months = +stored('range', 3) || 3;
+  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Range' });
+  const body = h('div', {});
+  function draw() {
+    chips.replaceChildren(...RANGES.map(([text, m]) => h('button', {
+      class: 'chip', type: 'button', 'aria-pressed': String(m === months),
+      onclick: () => { months = m; store('range', m); draw(); },
+    }, text)));
+    const from = todayDate();
+    from.setMonth(from.getMonth() - months);
+    const pts = hist.points.filter((p) => p.date >= isoOf(from));
+    const inRange = pts.length >= 2;
+    const shown = inRange ? pts : hist.points.slice(-2);
+    const first = shown[0].total_cents, last = shown.at(-1).total_cents;
+    const change = last - first;
+    const pct = first ? (100 * change) / first : 0;
+    const arrow = change > 0 ? '↑' : change < 0 ? '↓' : '';
+    body.replaceChildren(
+      h('p', { class: 'change' },
+        h('b', {}, `${arrow} ${signed(change).replace(/\.\d\d$/, '')} (${pct > 0 ? '+' : ''}${minus(pct.toFixed(1))}%)`.trim()),
+        h('span', { class: 'sub' }, inRange ? ` over ${RANGE_WORDS[months]}` : ` since ${fmtShort(shown[0].date)}`)),
+      ...lineChart([{ label: 'Value', color: 's1', points: shown }],
+        { zero: false, legend: false, head: 'Date', rowLabel: (p) => fmtShort(p.date), title: 'Value over time' }));
+  }
+  draw();
+  return card('Value over time', chips, body,
+    h('p', { class: 'sub' }, 'The shares you hold now, at each day’s closing price. Money you added or took out along the way isn’t in it.'),
+    hist.unpriced.length > 0 && h('p', { class: 'sub' }, `Left out (no price history): ${hist.unpriced.join(', ')}.`));
+}
+
+// Compounding once a year: the value grows by the rate, then the year's contributions go in. 7% is roughly the
+// long-run return of US stocks after inflation, so results read in today's dollars.
+const RATES = [0.04, 0.07, 0.10];
+
+function project(start, perYear, years, rate) {
+  const out = [start];
+  for (let k = 1; k <= years; k++) out.push(out[k - 1] * (1 + rate) + perYear);
+  return out.map(Math.round);
+}
+
+function projectionCard(startCents, contribCents) {
+  const yearsIn = h('input', { type: 'range', min: 1, max: 40, step: 1, value: +stored('years', 10) || 10, name: 'years', 'aria-label': 'Years ahead' });
+  const extraIn = num(stored('extra', ''), { name: 'extra-monthly', placeholder: '0' });
+  const yearsOut = h('b', {});
+  const body = h('div', {});
+  const yearLabel = (p) => (p.year === 0 ? 'Now' : `Year ${p.year}`);
+  function draw() {
+    const years = +yearsIn.value;
+    yearsOut.textContent = plural(years, 'year');
+    const extra = Math.max(readNum(extraIn) || 0, 0);
+    const perYear = contribCents + Math.round(extra * 100) * 12;
+    const [low, mid, high] = RATES.map((r) => project(startCents, perYear, years, r));
+    const putIn = startCents + perYear * years;
+    body.replaceChildren(
+      h('p', { class: 'hero' }, money0(mid.at(-1))),
+      h('p', { class: 'hero-sub' }, `in ${plural(years, 'year')} at 7% a year`),
+      h('p', { class: 'sub' }, `${money0(low.at(-1))} at 4% · ${money0(high.at(-1))} at 10%`),
+      h('p', { class: 'sub' }, `${money0(putIn)} of it is money in: today’s ${money0(startCents)}` +
+        (perYear ? ` plus ${money0(perYear)} a year` : '') + `. The other ${money0(Math.max(mid.at(-1) - putIn, 0))} is growth.`),
+      ...lineChart([{ label: 'At 7%', color: 's1', points: mid.map((c, i) => ({ year: i, total_cents: c })) }],
+        { legend: false, label: yearLabel, head: 'Year', rowLabel: yearLabel, band: { low, high, label: '4% to 10%' },
+          title: 'Where it could grow' }));
+  }
+  yearsIn.addEventListener('input', () => { store('years', yearsIn.value); draw(); });
+  extraIn.addEventListener('input', () => { store('extra', extraIn.value); draw(); });
+  draw();
+  return card('Where it could grow',
+    h('label', { class: 'field' }, h('span', {}, 'Years ahead: ', yearsOut), yearsIn),
+    field('Extra each month ($)', extraIn),
+    contribCents > 0 && h('p', { class: 'sub' }, `Already counts your ${money0(contribCents)} a year of paycheck contributions.`),
+    body,
+    h('p', { class: 'sub' }, 'Starts from what’s invested; cash isn’t counted. Not a forecast. 7% is about the long-run average for US stocks after inflation, so these are in today’s dollars. Real years swing well above and below it.'));
 }
 
 // --- Plan
@@ -560,7 +1129,8 @@ const readNum = (input) => {
 };
 
 async function screenPlan() {
-  const plan = await api('/api/plan');
+  const [plan, status] = await Promise.all([api('/api/plan'), api('/api/status')]);
+  setSynced(status.last_synced_at);
   const inc = plan.income || {};
   const f = {
     amount: num(inc.amount, { name: 'income-amount', placeholder: 'e.g. 2450…' }),
@@ -678,27 +1248,38 @@ function repeater(items, addLabel, make) {
 
 // --- shell: routing, sync, Ask Claude
 
-const SCREENS = { today: screenToday, spending: screenSpending, bills: screenBills, money: screenMoney, investing: screenInvesting, plan: screenPlan };
+const SCREENS = { today: screenToday, spending: screenSpending, transactions: screenTransactions, bills: screenBills,
+  money: screenMoney, investing: screenInvesting, plan: screenPlan };
 
+// The address is #screen, plus ?query for a screen that takes one (#transactions?period=week&q=coffee).
 async function render() {
-  const name = SCREENS[location.hash.slice(1)] ? location.hash.slice(1) : 'today';
+  const [path, query = ''] = location.hash.slice(1).split('?');
+  const name = Object.hasOwn(SCREENS, path) ? path : 'today';
   if (state.screen === 'plan' && name !== 'plan' && state.planDirty) {
-    if (!confirm('Leave without saving your plan changes?')) { history.replaceState(null, '', '#plan'); return; }
+    if (!confirm('Leave without saving your plan changes?')) { history.replaceState({ from: state.from }, '', '#plan'); return; }
     state.planDirty = false;
   } else if (name === 'plan' && state.screen === 'plan' && state.planDirty) {
     return;  // a sync or a return to the app must not wipe edits in progress
   }
   const changed = name !== state.screen;
+  if (changed && state.screen) state.scroll[state.screen] = main.scrollTop;  // Back returns to the same spot
+  // Each history entry keeps the screen it was opened from, so the Back button names where history.back() goes,
+  // even after the browser's own Back or Forward.
+  if (!history.state) history.replaceState({ from: changed ? state.screen || null : null }, '', location.hash);
+  state.from = history.state.from;
+  const restore = state.restore;
+  state.restore = false;
   state.screen = name;
+  const tab = TAB_OF[name] || name;
   document.getElementById('title').textContent = TITLES[name];
   document.title = `${TITLES[name]} · Money`;
   document.querySelectorAll('.tabs a').forEach((a) => {
-    if (a.dataset.tab === name) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+    if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
   const seq = ++state.seq;
   main.classList.add('loading');  // keep the previous frame, dimmed, until the new data arrives
   try {
-    const nodes = await SCREENS[name]();
+    const nodes = await SCREENS[name](new URLSearchParams(query));
     if (seq !== state.seq) return;
     main.replaceChildren(...nodes);
   } catch (e) {
@@ -708,7 +1289,7 @@ async function render() {
   } finally {
     if (seq === state.seq) main.classList.remove('loading');
   }
-  if (changed) window.scrollTo(0, 0);
+  if (changed) main.scrollTo(0, restore ? state.scroll[name] || 0 : 0);
 }
 
 async function syncNow() {
@@ -730,7 +1311,10 @@ async function syncNow() {
 
 // Copies a plain-text snapshot of the finances (plus this screen's detail) for pasting into Claude.
 async function askClaude() {
-  const screen = state.screen === 'spending' ? state.period : state.screen === 'plan' ? '' : state.screen;
+  // The snapshot's screen detail takes a named period; a custom range gets the month's.
+  const named = (period) => (period && period !== 'custom' ? period : 'spending');
+  const screen = { spending: () => named(state.period), transactions: () => named(state.view?.period), plan: () => '' }[state.screen]?.()
+    ?? state.screen;
   const url = '/api/snapshot?screen=' + encodeURIComponent(screen);
   const text = () => fetch(url).then((r) => {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -754,8 +1338,11 @@ document.getElementById('ask').addEventListener('click', askClaude);
 window.addEventListener('hashchange', render);
 window.addEventListener('beforeunload', (e) => { if (state.screen === 'plan' && state.planDirty) e.preventDefault(); });
 document.addEventListener('visibilitychange', () => {
-  // Coming back to the app after a while: show fresh numbers.
-  if (document.hidden) state.hiddenAt = Date.now();
-  else if (state.hiddenAt && Date.now() - state.hiddenAt > 60e3) render();
+  // Coming back to the app after a while: show fresh numbers. A long break counts as a fresh launch, because a phone
+  // can keep this page alive for days. Checking a charge in the bank's app and coming back leaves the card open.
+  if (document.hidden) { state.hiddenAt = Date.now(); return; }
+  const away = state.hiddenAt ? Date.now() - state.hiddenAt : 0;
+  if (away > 30 * 60e3) state.attentionOpen = false;
+  if (away > 60e3) render();
 });
 render();

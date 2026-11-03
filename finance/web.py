@@ -7,7 +7,7 @@ import asyncio
 import contextlib
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -18,7 +18,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import config, db, plan, store, sync, views
+from . import config, db, manual, money, plan, prices, store, sync, views
 
 log = logging.getLogger("finance")
 STATIC = Path(__file__).parent / "static"
@@ -48,7 +48,7 @@ def security_headers(app):
 
 def _ctx(request: Request):
     with contextlib.closing(db.connect()) as conn:
-        return views.gather(conn, plan.load(), request.app.state.clock())
+        return views.gather(conn, plan.load(), request.app.state.clock(), manual.load())
 
 
 def health(request: Request):
@@ -63,11 +63,39 @@ def screen(fn):
     return endpoint
 
 
-def spending(request: Request):
-    period = request.query_params.get("period", "month")
+MAX_RANGE_DAYS = 3 * 366
+
+
+def _dates(q):
+    """(start, end) dates from the query, or an error message."""
+    try:
+        start, end = date.fromisoformat(q["start"]), date.fromisoformat(q["end"])
+    except (KeyError, ValueError):
+        return None, "start and end must both be dates like 2026-10-01"
+    if end < start or start.year < 2000 or (end - start).days > MAX_RANGE_DAYS:
+        return None, "end must be on or after start, from 2000 on and at most 3 years apart"
+    return (start, end), None
+
+
+def _period(q, ctx):
+    """(period, start, end, error) from ?period= or ?start=&end=. A custom range wins over a period."""
+    if "start" in q or "end" in q:
+        dates, error = _dates(q)
+        return ("custom", *dates, None) if dates else (None, None, None, error)
+    period = q.get("period", "month")
     if period not in views.PERIODS:
-        return JSONResponse({"error": f"period must be one of {', '.join(views.PERIODS)}"}, status_code=400)
-    return JSONResponse(views.spending(_ctx(request), period))
+        return None, None, None, f"period must be one of {', '.join(views.PERIODS)}, or start and end"
+    if period == "pay_period" and not ctx["plan"].get("income"):
+        return None, None, None, "the pay period needs a pay schedule in the plan"
+    return period, None, None, None
+
+
+def spending(request: Request):
+    ctx = _ctx(request)
+    period, start, end, error = _period(request.query_params, ctx)
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
+    return JSONResponse(views.spending(ctx, period, start, end))
 
 
 def transactions(request: Request):
@@ -76,12 +104,47 @@ def transactions(request: Request):
         limit = min(int(q.get("limit", 200)), 2000)
     except ValueError:
         return JSONResponse({"error": "limit must be a number"}, status_code=400)
-    return JSONResponse(views.transactions(_ctx(request), q.get("start"), q.get("end"), q.get("account"),
-                                           q.get("q"), q.get("category"), limit))
+    ctx = _ctx(request)
+    start, end, period = q.get("start"), q.get("end"), None
+    if "period" in q or ("start" in q and "end" in q):
+        period, first, last, error = _period(q, ctx)
+        if error:
+            return JSONResponse({"error": error}, status_code=400)
+        if period == "custom":
+            start, end, period = first.isoformat(), last.isoformat(), None
+    return JSONResponse(views.transactions(ctx, start, end, q.get("account"), q.get("q"), q.get("category"),
+                                           limit, period, q.get("merchant")))
 
 
 def alerts(request: Request):
-    return JSONResponse({"alerts": views.alerts(_ctx(request))})
+    return JSONResponse(views.alerts(_ctx(request)))
+
+
+async def dismiss_alert(request: Request):
+    """Hide one alert. An id no alert has is dropped: it already went away while the page was open."""
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    alert_id = body.get("id") if isinstance(body, dict) else None
+    if not isinstance(alert_id, str):
+        return JSONResponse({"error": "body must be {\"id\": \"<alert id>\"}"}, status_code=400)
+    return JSONResponse(await asyncio.to_thread(_dismiss, alert_id, request.app.state.clock()))
+
+
+def _dismiss(alert_id, now):
+    with contextlib.closing(db.connect()) as conn:
+        ctx = views.gather(conn, plan.load(), now, manual.load())
+        if any(a["id"] == alert_id for a in views.alerts(ctx)["alerts"]):
+            store.dismiss_alert(conn, alert_id, ctx["now"].isoformat(timespec="seconds"))
+            ctx["dismissed_alerts"] = store.dismissed_alerts(conn)
+    return views.alerts(ctx)
+
+
+def restore_alerts(request: Request):
+    with contextlib.closing(db.connect()) as conn:
+        store.restore_alerts(conn)
+    return JSONResponse(views.alerts(_ctx(request)))
 
 
 def snapshot(request: Request):
@@ -103,16 +166,47 @@ async def put_plan(request: Request):
         return JSONResponse({"errors": e.errors}, status_code=400)
 
 
+def get_manual(request: Request):
+    return JSONResponse(manual.load())
+
+
+async def put_manual(request: Request):
+    """Save data/manual.json, then price it at once so a mistyped symbol shows up in the answer."""
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"errors": ["body must be JSON"]}, status_code=400)
+    try:
+        saved = manual.save(body)
+    except manual.ManualError as e:
+        return JSONResponse({"errors": e.errors}, status_code=400)
+    with contextlib.closing(db.connect()) as conn:
+        fetched = await asyncio.to_thread(_refresh_prices, conn, request.app)
+    return JSONResponse({"manual": saved, "prices": fetched})
+
+
 # --- sync
 
-def _sync_blocking(make_client):
+def _refresh_prices(conn, app, brokerage=False):
+    """Prices for the hand-entered holdings, and with `brokerage` for the linked accounts' tickers too."""
+    tickers = sorted({h["ticker"] for h in store.holdings(conn) if h["ticker"] and ":" not in h["ticker"]
+                      and money.bucket_of(h) != "cash"}) if brokerage else ()
+    return prices.refresh(conn, manual.load(), app.state.clock().astimezone().date(), app.state.get_url, tickers)
+
+
+def _sync_blocking(app):
     with contextlib.closing(db.connect()) as conn:
-        return sync.sync_all(conn, make_client)
+        results = sync.sync_all(conn, app.state.make_client)
+        try:
+            _refresh_prices(conn, app, brokerage=True)
+        except Exception:  # prices are a side dish: never fail the bank sync over them
+            log.exception("price refresh failed")
+        return results
 
 
 async def run_sync(app):
     async with app.state.sync_lock:
-        results = await asyncio.to_thread(_sync_blocking, app.state.make_client)
+        results = await asyncio.to_thread(_sync_blocking, app)
     for r in results:
         log.info("sync %s: %s%s", r["item_id"], r["status"], f" ({r['error_code']})" if r.get("error_code") else "")
     return results
@@ -159,7 +253,7 @@ async def scheduler(app):
         not_ready = any(r["status"] == "not_ready" for r in results)
 
 
-def create_app(clock=None, make_client=None) -> Starlette:
+def create_app(clock=None, make_client=None, get_url=None) -> Starlette:
     @contextlib.asynccontextmanager
     async def lifespan(app):
         os.umask(0o077)  # database and plan files are readable by the owner only
@@ -182,9 +276,13 @@ def create_app(clock=None, make_client=None) -> Starlette:
             Route("/api/holdings", screen(views.holdings)),
             Route("/api/transactions", transactions),
             Route("/api/alerts", alerts),
+            Route("/api/alerts/dismissed", dismiss_alert, methods=["PUT"]),
+            Route("/api/alerts/dismissed", restore_alerts, methods=["DELETE"]),
             Route("/api/snapshot", snapshot),
             Route("/api/plan", get_plan, methods=["GET"]),
             Route("/api/plan", put_plan, methods=["PUT"]),
+            Route("/api/manual", get_manual, methods=["GET"]),
+            Route("/api/manual", put_manual, methods=["PUT"]),
             Route("/api/sync", sync_now, methods=["POST"]),
             Mount("/", StaticFiles(directory=STATIC, html=True, check_dir=False)),
         ],
@@ -193,6 +291,7 @@ def create_app(clock=None, make_client=None) -> Starlette:
     )
     app.state.clock = clock or (lambda: datetime.now(timezone.utc))
     app.state.make_client = make_client
+    app.state.get_url = get_url or prices.http_get
     return app
 
 

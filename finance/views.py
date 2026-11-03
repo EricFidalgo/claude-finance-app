@@ -4,17 +4,20 @@
 """
 from datetime import datetime, timedelta
 
-from . import money, store
+from . import money, prices, store
 
-PERIODS = ("today", "week", "last_week", "month", "last_month")
+PERIODS = ("today", "week", "pay_period", "last_week", "month", "last_month")
 ACCOUNT_ORDER = {"depository": 0, "credit": 1, "loan": 2, "investment": 3}
 
 
-def gather(conn, plan, now):
+def gather(conn, plan, now, manual):
     today = now.astimezone().date()
-    accounts = sorted(store.accounts(conn), key=lambda a: (ACCOUNT_ORDER.get(a["type"], 9), not money.is_checking(a)))
+    price_series = store.prices(conn)
+    entered_accounts, entered_holdings = money.manual_holdings(manual, price_series, plan.get("income"), today)
+    accounts = sorted(store.accounts(conn) + entered_accounts,
+                      key=lambda a: (ACCOUNT_ORDER.get(a["type"], 9), not money.is_checking(a)))
     txns = store.transactions(conn)
-    holdings = store.holdings(conn)
+    holdings = sorted(store.holdings(conn) + entered_holdings, key=lambda h: -(h["value_cents"] or 0))
     recurring = money.detect_recurring(txns, today)
     upcoming = money.upcoming_bills(accounts, plan, recurring, txns, today)
     unusual = money.unusual_charges(txns, today, plan.get("bills") or [])
@@ -26,10 +29,13 @@ def gather(conn, plan, now):
         "txns": txns,
         "holdings": holdings,
         "items": store.items(conn),
+        "dismissed_alerts": store.dismissed_alerts(conn),
         "recurring": recurring,
         "upcoming": upcoming,
         "unusual": unusual,
         "typical_monthly_cents": money.typical_monthly_spend(txns, today),
+        "prices": price_series,
+        "manual": manual,
     }
 
 
@@ -54,17 +60,32 @@ def status(ctx):
 
 
 def alerts(ctx):
-    return money.alerts(ctx["items"], ctx["upcoming"], ctx["unusual"], ctx["now"].isoformat())
+    """The attention list: what's live and not dismissed, plus how many live ones are hidden."""
+    live = money.alerts(ctx["items"], ctx["upcoming"], ctx["unusual"], ctx["now"].isoformat())
+    shown = [a for a in live if a["id"] not in ctx["dismissed_alerts"]]
+    return {"alerts": shown, "dismissed_count": len(live) - len(shown)}
+
+
+RECENT = 6
 
 
 def today(ctx):
-    spent = money.spend_summary(ctx["txns"], "today", ctx["today"])
+    income = ctx["plan"].get("income")
+    spent = [{k: s[k] for k in ("period", "start", "end", "total_cents")}
+             for s in (money.spend_summary(ctx["txns"], p, ctx["today"], income)
+                       for p in ("today", "week", "pay_period" if income else "month"))]
+    attention = alerts(ctx)
     return {
         "date": ctx["today"].isoformat(),
         "safe_to_spend": money.safe_to_spend(ctx["accounts"], ctx["plan"], ctx["txns"], ctx["today"]),
-        "alerts": alerts(ctx),
-        "spent_today_cents": spent["total_cents"],
+        "alerts": attention["alerts"],
+        "alerts_dismissed": attention["dismissed_count"],
+        "spent_today_cents": spent[0]["total_cents"],
+        "spent": spent,
+        "recent": _mark_spending(ctx["txns"][:RECENT]),
         "next_bills": [b for b in ctx["upcoming"]["bills"] if not b["paid"]][:3],
+        "tips": money.tips(ctx["accounts"], ctx["holdings"], ctx["plan"], ctx["txns"], ctx["recurring"],
+                           ctx["typical_monthly_cents"], ctx["today"]),
         "last_synced_at": _last_synced(ctx),
     }
 
@@ -83,14 +104,16 @@ def _cumulative(txns, start, end):
     return out
 
 
-def spending(ctx, period="month"):
-    s = money.spend_summary(ctx["txns"], period, ctx["today"])
-    start, end, pstart, pend = money.period_range(period, ctx["today"])
+def spending(ctx, period="month", start=None, end=None):
+    income = ctx["plan"].get("income")
+    s = money.spend_summary(ctx["txns"], period, ctx["today"], income, start, end)
+    start, end, pstart, pend = money.period_range(period, ctx["today"], income, start, end)
     for c in s["by_category"]:
         c["label"] = category_label(c["category"])
     targets = ctx["plan"].get("monthly_spend") or {}
     return {
         **s,
+        "payday": _payday(ctx),
         "trend": {"current": _cumulative(s["transactions"], start, end),
                   "previous": _cumulative(ctx["txns"], pstart, pend)},
         "targets_cents": {k: money.to_cents(v) for k, v in targets.items()},
@@ -100,8 +123,12 @@ def spending(ctx, period="month"):
 
 
 def bills(ctx):
+    first = ctx["today"].replace(day=1)
     return {
         **ctx["upcoming"],
+        # this month and next, for the calendar
+        "calendar": money.month_events(ctx["plan"], ctx["recurring"], ctx["txns"], first,
+                                       (first + timedelta(days=62)).replace(day=1), ctx["today"]),
         "recurring": [{k: v for k, v in r.items() if k != "dates"} for r in ctx["recurring"]],
         "price_flags": [u for u in ctx["unusual"] if u["kind"] in ("price_change", "higher_than_usual")],
         "declared": ctx["plan"].get("bills") or [],
@@ -126,11 +153,21 @@ def holdings(ctx):
         "allocation": money.allocation(ctx["holdings"]),
         "left_to_invest": money.left_to_invest(ctx["accounts"], ctx["holdings"], ctx["plan"], ctx["upcoming"],
                                                ctx["typical_monthly_cents"]),
+        "history": money.portfolio_history(ctx["holdings"], ctx["prices"],
+                                           ctx["today"] - timedelta(days=prices.HISTORY_DAYS), ctx["today"]),
+        "contributions_per_year_cents": money.yearly_contributions(ctx["manual"], ctx["plan"].get("income")),
         "last_synced_at": _last_synced(ctx),
     }
 
 
-def transactions(ctx, start=None, end=None, account=None, q=None, category=None, limit=200):
+def transactions(ctx, start=None, end=None, account=None, q=None, category=None, limit=200, period=None,
+                 merchant=None):
+    """Transactions matching every filter, newest first, and the spending among them. A named period sets
+    start and end. merchant matches exactly, as Spending's top merchants group; q matches any part of a name."""
+    income = ctx["plan"].get("income")
+    if period:
+        first, last, _, _ = money.period_range(period, ctx["today"], income)
+        start, end = first.isoformat(), last.isoformat()
     rows = ctx["txns"]
     if start:
         rows = [t for t in rows if t["date"] >= start]
@@ -139,11 +176,25 @@ def transactions(ctx, start=None, end=None, account=None, q=None, category=None,
     if account:
         rows = [t for t in rows if account in (t["account_key"], t["account_mask"])]
     if category:
-        rows = [t for t in rows if t["category"] == category]
+        rows = [t for t in rows if (t["category"] or "OTHER") == category]  # the same key as by_category
+    if merchant:
+        rows = [t for t in rows if money.merchant_of(t) == merchant]
     if q:
         q = q.lower()
         rows = [t for t in rows if q in (t["name"] or "").lower() or q in (t["merchant_name"] or "").lower()]
-    return {"transactions": rows[:limit], "count": len(rows)}
+    return {"start": start, "end": end, "transactions": _mark_spending(rows[:limit]), "count": len(rows),
+            "spent_cents": money.spending_total(rows), "last_synced_at": _last_synced(ctx), "payday": _payday(ctx)}
+
+
+def _payday(ctx):
+    """The next payday, or None without a pay schedule: a screen offers the pay period only when there is one."""
+    income = ctx["plan"].get("income")
+    return money.next_payday(income, ctx["today"]).isoformat() if income else None
+
+
+def _mark_spending(rows):
+    """Rows marked with whether they count as spending, so a list shows which ones make up its total."""
+    return [{**t, "spending": money.is_spending(t)} for t in rows]
 
 
 # --- Ask Claude snapshot
@@ -157,7 +208,8 @@ def _local(ts):
 
 
 def _account_line(a):
-    label = f"{a['name']} …{a['mask']} ({a['subtype'] or a['type']})"
+    mask = f" …{a['mask']}" if a["mask"] else ""
+    label = f"{a['name']}{mask} ({a['subtype'] or a['type']})"
     if a["type"] == "credit":
         return f"- {label}: owed {_d(money.card_owed(a))} incl. pending" + \
             (f", limit {_d(a['limit_cents'])}" if a.get("limit_cents") else "")
@@ -167,7 +219,7 @@ def _account_line(a):
 
 
 def _period_line(ctx, period, title):
-    s = money.spend_summary(ctx["txns"], period, ctx["today"])
+    s = money.spend_summary(ctx["txns"], period, ctx["today"], ctx["plan"].get("income"))
     cats = ", ".join(f"{category_label(c['category'])} {_d(c['total_cents'])}" for c in s["by_category"][:6])
     return f"- {title} ({s['start']} to {s['end']}): {_d(s['total_cents'])}" + (f". {cats}" if cats else "")
 
@@ -184,10 +236,13 @@ def _screen_lines(ctx, screen):
             return [f"Safe to spend: needs {' and '.join(s['missing'])} in the plan."]
         return [f"Safe to spend: {_d(s['per_day_cents'])}/day until payday {s['payday']} ({s['days']} days)"] + \
             [f"  {line['label']}: {_d(line['amount_cents'])}" for line in s["lines"]] + \
-            [f"  = {_d(s['available_cents'])} ÷ {s['days']} days"]
+            [f"  = {_d(s['available_cents'])} ÷ {s['days']} days",
+             f"Today's allowance {_d(s['allowance_cents'])}: spent {_d(s['spent_today_cents'])}, "
+             f"{_d(s['left_today_cents'])} left"]
     if screen in ("spending",) + PERIODS:
-        period = screen if screen in PERIODS else "month"
-        s = money.spend_summary(ctx["txns"], period, ctx["today"])
+        income = ctx["plan"].get("income")
+        period = screen if screen in PERIODS and (income or screen != "pay_period") else "month"
+        s = money.spend_summary(ctx["txns"], period, ctx["today"], income)
         return [f"Spending transactions {s['start']} to {s['end']} (amount, + is money out):"] + \
             [_txn_line(t) for t in s["transactions"][:80]]
     if screen == "bills":
@@ -241,6 +296,7 @@ def snapshot(ctx, screen=None):
         _period_line(ctx, "last_month", "Last month"),
         _period_line(ctx, "week", "This week"),
         _period_line(ctx, "last_week", "Last week"),
+        *([_period_line(ctx, "pay_period", "Since payday")] if ctx["plan"].get("income") else []),
         f"- Typical month (last complete months): {_d(ctx['typical_monthly_cents'])}",
         "",
         "Upcoming bills (35 days)",
@@ -262,9 +318,11 @@ def snapshot(ctx, screen=None):
         "Plan",
         *_plan_lines(ctx["plan"]),
     ]
-    found = alerts(ctx)
-    if found:
-        lines += ["", "Needs attention"] + [f"- {a['title']}: {a['detail']}" for a in found]
+    attention = alerts(ctx)
+    if attention["alerts"] or attention["dismissed_count"]:
+        lines += ["", "Needs attention"] + [f"- {a['title']}: {a['detail']}" for a in attention["alerts"]]
+        if attention["dismissed_count"]:
+            lines.append(f"- {attention['dismissed_count']} more dismissed by the owner")
     extra = _screen_lines(ctx, screen)
     if extra:
         lines += ["", f"This screen ({screen})", *extra]

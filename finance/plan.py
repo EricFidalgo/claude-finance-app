@@ -3,6 +3,7 @@
 Amounts in the file are dollars (what a person types). `money.to_cents()` brings them into the app's integer cents.
 """
 import json
+import math
 import os
 from datetime import date
 
@@ -46,7 +47,7 @@ def normalize(p: dict) -> dict:
 
 
 def _is_amount(x):
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= 0  # 1e400 parses as inf
 
 
 def _is_date(x):
