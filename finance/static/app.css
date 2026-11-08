@@ -410,6 +410,28 @@ input[type="range"] { width: 100%; min-height: 44px; accent-color: var(--accent)
 .is-reminder .date-badge { background: none; box-shadow: inset 0 0 0 1px var(--line); }
 .row.event .row-title { font-weight: 600; }
 .row-note { flex-basis: 100%; }  /* a reminder's how-to, on its own line */
+.is-paid .row-title, .is-paid .amt { color: var(--ink-2); font-weight: 400; }
+.is-paid .date-mon { color: var(--muted); }
+/* Bills schedule: a payday is a band across the list */
+.payday-band {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-height: 40px; margin: 6px 0; padding: 8px 12px; border-radius: 10px;
+  background: color-mix(in srgb, var(--s3) 14%, transparent); font-size: 0.88rem;
+}
+.payday-band .ico { width: 18px; height: 18px; stroke-width: 2.2; color: var(--s3); }
+.payday-band > span { margin-left: auto; color: var(--ink-2); white-space: nowrap; }
+.payday-band + .row { border-top: 0; }
+.rows > .payday-band:first-child { margin-top: 0; }
+.rows > .payday-band:last-child { margin-bottom: 0; }
+/* Loans: the name, then three numbers in tiles */
+.loan + .loan { margin-top: 14px; padding-top: 14px; border-top: 0.5px solid var(--line); }
+.loan-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 0 8px; }
+.loan-next { color: var(--ink-2); font-size: 0.85rem; white-space: nowrap; }
+.loan .loan-note { margin: 8px 0 0; }  /* beats .tiles + .sub */
+.tile.static:active { opacity: 1; }  /* numbers only, nothing to open */
+.loan-foot { margin: 12px 0 0; }
+/* Recurring charges already in the plan step back */
+.row.in-plan .row-title, .row.in-plan .amt { color: var(--ink-2); }
+.row.in-plan .row-amt { font-weight: 400; }
 /* Tips: an icon tile per kind, a short title and a quieter detail */
 .tips { list-style: none; margin: 0; padding: 0; }
 .tip-item { display: flex; gap: 12px; padding: 12px 0; border-top: 0.5px solid var(--line); }
@@ -562,7 +584,7 @@ input[type="range"] { width: 100%; min-height: 44px; accent-color: var(--accent)
 }
 @media (forced-colors: active) {
   .bar, .gauge-fill, .mark, .stack > span, .key-line, .key-rect { forced-color-adjust: none; border: 1px solid CanvasText; }
-  .tile, .sheet, .filter, .date-badge, .tip-icon { border: 1px solid CanvasText; }
+  .tile, .sheet, .filter, .date-badge, .tip-icon, .payday-band { border: 1px solid CanvasText; }
 }
 
 /* Connections on the Money screen: per-bank Fix login / Remove, and the Add buttons under the list. */

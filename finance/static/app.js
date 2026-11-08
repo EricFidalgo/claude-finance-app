@@ -324,7 +324,7 @@ function dateBadge(iso) {
 }
 const weekdayLine = (iso) => `${WEEKDAY_FMT.format(parseDay(iso))} · ${relDay(iso)}`;
 const billAmount = (b) => (b.estimated ? '~' : '') + money(b.amount_cents);
-const billEventRow = (b) => eventRow(b.due, b.name, [weekdayLine(b.due), billTags(b)], billAmount(b));
+const billEventRow = (b) => eventRow(b.due, b.name, [weekdayLine(b.due), billTags(b)], billAmount(b), b.paid && 'is-paid');
 const reminderEventRow = (r) => eventRow(r.date, r.title,
   [weekdayLine(r.date), tag('Reminder', 'bell'), r.detail && h('span', { class: 'row-note' }, r.detail)], null, 'is-reminder');
 
@@ -891,9 +891,6 @@ function billTags(b) {
     b.source === 'detected' && tag('Detected', 'repeat'),
   ];
 }
-function billRow(b) {
-  return row(b.name, [`${fmtDay(b.due)} · ${relDay(b.due)}`, billTags(b)], billAmount(b));
-}
 
 async function screenBills() {
   const d = await api('/api/bills');
@@ -907,26 +904,12 @@ async function screenBills() {
 
   const events = [...d.bills.map((b) => ({ date: b.due, bill: b })), ...d.paydays.map((p) => ({ date: p }))]
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.bill ? 1 : -1));
+  // Paydays are bands across the list, so the bills fall into the pay period that covers them.
   const timeline = card('Schedule', events.length === 0
     ? h('p', { class: 'empty' }, 'No bills found. Add them on the Plan screen.')
-    : h('ul', { class: 'rows' }, events.map((e) => e.bill ? billRow(e.bill)
-      : h('li', { class: 'row' }, h('div', { class: 'row-main' },
-        h('div', { class: 'row-title' }, statusLine('good', 'Payday')),
-        h('div', { class: 'row-sub' }, `${fmtDay(e.date)} · ${relDay(e.date)}`))))));
+    : h('ul', { class: 'rows' }, events.map((e) => (e.bill ? billEventRow(e.bill) : paydayBand(e.date)))));
 
-  const declared = new Set(d.declared.map((b) => b.name.toLowerCase()));
-  const recurring = card('Recurring charges found',
-    d.recurring.length === 0
-      ? h('p', { class: 'empty' }, 'None found yet. This needs a few months of history.')
-      : h('ul', { class: 'rows' }, d.recurring.map((r) => h('li', { class: 'row' },
-        h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, r.merchant),
-          h('div', { class: 'row-sub' }, `${r.cadence} · next ${fmtShort(r.next_due)}`, !r.fixed && tag('Varies'))),
-        h('div', { class: 'row-amt' }, (r.fixed ? '' : '~') + money(r.amount_cents)),
-        declared.has(r.merchant.toLowerCase())
-          ? tag('In plan', 'check')
-          : h('button', { class: 'btn small', type: 'button', 'aria-label': `Add ${r.merchant} to plan`, onclick: (e) => addBill(r, e.currentTarget) }, 'Add')))));
-
-  const out = [hero, calendarCard(d.calendar), timeline, loansCard(d.loans), recurring];
+  const out = [hero, calendarCard(d.calendar), timeline, loansCard(d.loans), recurringCard(d.recurring, d.declared)];
   if (d.price_flags.length) {
     out.push(card('Price changes', h('ul', { class: 'rows' },
       d.price_flags.map((u) => row(u.merchant, [statusLine('warning', u.detail), fmtShort(u.date)], money(u.amount_cents))))));
@@ -934,17 +917,43 @@ async function screenBills() {
   return out;
 }
 
+function paydayBand(date) {
+  return h('li', { class: 'payday-band' }, icon('payday'), h('b', {}, 'Payday'), h('span', {}, `${fmtDay(date)} · ${relDay(date)}`));
+}
+
 // Bills with a balance in the plan count down with each payment to a payoff month.
 const MON_YEAR = new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' });
 function loansCard(loans) {
   if (!loans.length) return null;
-  return card('Loans', h('ul', { class: 'rows' }, loans.map((l) => {
-    if (!l.remaining_cents) return row(l.name, statusLine('good', 'Paid off'), money(0));
+  const stat = (label, value) => h('div', { class: 'tile static' }, h('span', { class: 'tile-label' }, label), h('span', { class: 'tile-amt' }, value));
+  return card('Loans', loans.map((l) => {
+    if (!l.remaining_cents) return h('div', { class: 'loan' }, h('div', { class: 'loan-head' }, h('b', {}, l.name), statusLine('good', 'Paid off')));
     const usual = l.payments_left > 1 ? (l.remaining_cents - l.last_payment_cents) / (l.payments_left - 1) : null;
-    const last = usual != null && l.last_payment_cents !== usual ? ` · last one ${money(l.last_payment_cents)}` : '';
-    return row(l.name, [l.payoff ? `Paid off about ${MON_YEAR.format(parseDay(l.payoff))}` : 'No payoff date',
-      `${plural(l.payments_left, 'payment')} left${last}`], money(l.remaining_cents), 'left');
-  })), h('p', { class: 'sub' }, 'Counts down from the balance in your plan with each payment that posts.'));
+    const lastDiffers = usual != null && l.last_payment_cents !== usual;
+    return h('div', { class: 'loan' },
+      h('div', { class: 'loan-head' }, h('b', {}, l.name), l.next_due && h('span', { class: 'loan-next' }, `Next payment ${fmtShort(l.next_due)}`)),
+      h('div', { class: 'tiles' }, stat('Left', compact(l.remaining_cents)), stat('Payments', l.payments_left != null ? `${l.payments_left} left` : '—'),
+        stat('Payoff', l.payoff ? MON_YEAR.format(parseDay(l.payoff)) : '—')),
+      lastDiffers && h('p', { class: 'sub loan-note' }, `The last payment is ${money(l.last_payment_cents)}.`));
+  }), h('p', { class: 'sub loan-foot' }, 'Counts down from the balance in your plan with each payment that posts.'));
+}
+
+// Repeat charges seen in the transactions: the ones the plan doesn't set aside for come first, each with Add.
+function recurringCard(recurring, declaredBills) {
+  if (!recurring.length) return card('Recurring charges found', h('p', { class: 'empty' }, 'None found yet. This needs a few months of history.'));
+  const declared = new Set(declaredBills.map((b) => b.name.toLowerCase()));
+  const inPlan = (r) => declared.has(r.merchant.toLowerCase());
+  const chargeRow = (r) => {
+    const li = row(r.merchant, [`${(r.cadence || '').replace(/^./, (c) => c.toUpperCase())} · next ${fmtShort(r.next_due)}`, !r.fixed && tag('Varies')],
+      (r.fixed ? '' : '~') + money(r.amount_cents));
+    if (inPlan(r)) li.classList.add('in-plan');
+    else li.append(h('button', { class: 'btn small', type: 'button', 'aria-label': `Add ${r.merchant} to plan`, onclick: (e) => addBill(r, e.currentTarget) }, 'Add'));
+    return li;
+  };
+  const outside = recurring.filter((r) => !inPlan(r)), kept = recurring.filter(inPlan);
+  return card('Recurring charges found', h('ul', { class: 'rows' },
+    outside.length > 0 && [h('li', { class: 'day-head' }, 'Not in your plan'), outside.map(chargeRow)],
+    kept.length > 0 && [h('li', { class: 'day-head' }, 'Already in your plan'), kept.map(chargeRow)]));
 }
 
 // A month grid: paydays are squares, bills are dots (hollow once paid), so shape carries the meaning and color
