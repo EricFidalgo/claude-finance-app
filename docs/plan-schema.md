@@ -53,7 +53,7 @@ Amounts are **dollars** (`1650` or `15.49`), not cents. Dates are `YYYY-MM-DD`.
 | `goals[].by` | date, optional | When you need the money. Without it the goal sets nothing aside. On this date the money is freed back into safe-to-spend. |
 | `goals[].start` | date, optional | When saving began. Filled in by the app; leave it alone. |
 | `goals[].saved` | dollars ≥ 0, optional | Already set aside on `start`. Filled in by the app when you change a goal. |
-| `reminders` | list | Optional. Each needs `date` and `title`; `detail` is optional text. From its date on, a reminder shows under Needs attention on Today (and in the snapshot) until dismissed; before it, the snapshot lists it with the plan. |
+| `reminders` | list | Optional. Each needs `date` and `title`; `detail` is optional text. From its date on, a reminder shows under Needs attention on Today (and in the snapshot) until dismissed; before it, the next three show under Coming up on Today and the snapshot lists it with the plan. |
 
 Each goal sets aside an equal slice of what's left (`target` − `saved`) on every payday after `start`, up to (not on) `by`. What it has set aside so far is subtracted from safe-to-spend and from "ready to invest", like the buffer. Saving a goal whose `target` or `by` changed keeps what it had set aside by today as `saved` and moves `start` to today, so only the rest is spread over the paydays left. A goal is matched to its earlier version by `name` and `start`.
 

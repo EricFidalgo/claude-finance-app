@@ -885,3 +885,12 @@ def test_an_account_with_holdings_splits_into_cash_and_invested_and_any_balance_
     assert money.account_parts({**CMA, "current_cents": 1050000}, HOLDINGS) == {"cash_cents": 350000,
                                                                                  "invested_cents": 700000}
     assert money.account_parts(CHECKING, HOLDINGS) is None
+
+
+def test_coming_up_lists_the_next_reminders_after_today_soonest_first():
+    reminders = [{"date": "2027-01-29", "title": "Refill Merrill"}, {"date": "2026-11-08", "title": "Due today"},
+                 {"date": "2026-12-08", "title": "Check fund payouts"}, {"date": "2026-11-20", "title": "Move trip money"},
+                 {"date": "2026-12-15", "title": "Sell DODGX"}]
+    # today's and past ones are under Needs attention instead
+    assert [r["title"] for r in money.reminders_ahead(reminders, date(2026, 11, 8))] == \
+        ["Move trip money", "Check fund payouts", "Sell DODGX"]

@@ -425,6 +425,8 @@ def test_a_plan_reminder_shows_on_its_date_and_stays_until_dismissed(app):
                                                         ("reminder", "Move trip money")]
     assert shown[1]["detail"] == "Take $500 from Merrill cash"
     assert "Sell DODGX and fund the Roth on 2026-12-22" in app.get("/api/snapshot").text  # the plan lists what's ahead
+    assert [(r["date"], r["title"]) for r in app.get("/api/today").json()["reminders_ahead"]] == \
+        [("2026-12-22", "Sell DODGX and fund the Roth")]  # Today shows it under Coming up until its date
 
     app.put("/api/alerts/dismissed", json={"id": shown[1]["id"]})
     assert [a["title"] for a in app.get("/api/alerts").json()["alerts"]] == ["Check fund payouts"]

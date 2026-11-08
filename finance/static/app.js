@@ -78,6 +78,7 @@ function setAttrs(el, attrs) {
 
 const ICONS = {
   check: [['path', { d: 'M5 12.5l4.5 4.5L19 7.5' }]],
+  bell: [['path', { d: 'M6 16v-5a6 6 0 0 1 12 0v5l1.5 2h-15z' }], ['path', { d: 'M10 20.5a2 2 0 0 0 4 0' }]],
   warning: [['path', { d: 'M12 4 2.5 20h19z' }], ['path', { d: 'M12 10v4.5M12 17.5h.01' }]],
   critical: [['circle', { cx: 12, cy: 12, r: 9 }], ['path', { d: 'M12 7.5v5.5M12 16.5h.01' }]],
   info: [['circle', { cx: 12, cy: 12, r: 9 }], ['path', { d: 'M12 11v5.5M12 7.5h.01' }]],
@@ -88,6 +89,9 @@ const ICONS = {
   right: [['path', { d: 'M9.5 6l6 6-6 6' }]],
   back: [['path', { d: 'M14.5 6l-6 6 6 6' }]],
   expand: [['path', { d: 'M14 4h6v6M10 20H4v-6M20 4l-6.5 6.5M4 20l6.5-6.5' }]],
+  pace: [['path', { d: 'M3.5 17.5l6-6 4 4 7-7.5' }], ['path', { d: 'M15.5 8h5v5' }]],
+  card: [['rect', { x: 3, y: 5.5, width: 18, height: 13, rx: 2 }], ['path', { d: 'M3 10h18M7 15h3' }]],
+  shield: [['path', { d: 'M12 3.5 5 6v5.5c0 4.2 3 7.6 7 9 4-1.4 7-4.8 7-9V6z' }]],
 };
 function icon(name) {
   return s('svg', { viewBox: '0 0 24 24', class: 'ico', 'aria-hidden': 'true' },
@@ -119,6 +123,8 @@ const DAY_FMT = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'sho
 const SHORT_FMT = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
 const fmtDay = (iso) => DAY_FMT.format(parseDay(iso));
 const fmtShort = (iso) => SHORT_FMT.format(parseDay(iso));
+const MON_FMT = new Intl.DateTimeFormat('en-US', { month: 'short' });
+const WEEKDAY_FMT = new Intl.DateTimeFormat('en-US', { weekday: 'short' });
 const YEAR_FMT = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 function fmtRange(start, end) {
   if (start === end) return fmtDay(start);
@@ -289,19 +295,46 @@ async function screenToday() {
     hero = allowanceCard(sts);
   }
 
-  const next = card('Coming up',
-    d.next_bills.length === 0
-      ? h('p', { class: 'empty' }, 'No bills in the next 35 days.')
-      : h('ul', { class: 'rows' }, d.next_bills.map(billRow)),
-    h('p', {}, h('a', { href: '#bills' }, 'Calendar and all bills')));
-
   const out = [hero, spentCard(d.spent), goalsCard(d.goals), attentionCard(d.alerts, d.alerts_dismissed), recentCard(d.recent, d.spent.at(-1), d.date),
-    next].filter(Boolean);
-  if (d.tips.length) {
-    out.push(card('Tips', d.tips.slice(0, 3).map((t) => h('div', { class: 'alert st-info' }, icon('info'),
-      h('div', {}, h('div', { class: 'alert-title' }, t.title), h('div', { class: 'alert-detail' }, t.detail))))));
-  }
+    comingUpCard(d.next_bills, d.reminders_ahead), tipsCard(d.tips)].filter(Boolean);
   return out;
+}
+
+// Bills and plan reminders in one list by date, each led by a calendar-page badge so the dates scan down the left.
+// Reminders wait here until their date, then move to Needs attention.
+function comingUpCard(bills, reminders) {
+  const items = [...bills.map((b) => ({ date: b.due, bill: b })), ...reminders.map((r) => ({ date: r.date, reminder: r }))]
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.bill ? -1 : 1));
+  return card('Coming up',
+    items.length > 0 && h('ul', { class: 'rows' }, items.map((e) => (e.bill ? billEventRow(e.bill) : reminderEventRow(e.reminder)))),
+    bills.length === 0 && h('p', { class: 'empty' }, 'No bills in the next 35 days.'),
+    h('a', { class: 'link-row', href: '#bills' }, 'Calendar and all bills', icon('right')));
+}
+// A row led by a date badge, for lists that run by date.
+function eventRow(date, title, sub, amount, cls) {
+  const li = row(title, sub, amount);
+  li.classList.add('event');
+  if (cls) li.classList.add(cls);
+  li.prepend(dateBadge(date));
+  return li;
+}
+function dateBadge(iso) {
+  const d = parseDay(iso);
+  return h('div', { class: 'date-badge' }, h('span', { class: 'date-mon' }, MON_FMT.format(d)), h('span', { class: 'date-num' }, d.getDate()));
+}
+const weekdayLine = (iso) => `${WEEKDAY_FMT.format(parseDay(iso))} · ${relDay(iso)}`;
+const billAmount = (b) => (b.estimated ? '~' : '') + money(b.amount_cents);
+const billEventRow = (b) => eventRow(b.due, b.name, [weekdayLine(b.due), billTags(b)], billAmount(b));
+const reminderEventRow = (r) => eventRow(r.date, r.title,
+  [weekdayLine(r.date), tag('Reminder', 'bell'), r.detail && h('span', { class: 'row-note' }, r.detail)], null, 'is-reminder');
+
+// Each kind of tip gets its own icon, so a glance tells a budget nudge from a card or cash one.
+const TIP_ICON = { pace: 'pace', card: 'card', runway: 'shield', subscriptions: 'repeat' };
+function tipsCard(tips) {
+  if (!tips.length) return null;
+  return card('Tips', h('ul', { class: 'tips' }, tips.slice(0, 3).map((t) => h('li', { class: 'tip-item' },
+    h('span', { class: 'tip-icon' }, icon(TIP_ICON[t.kind] || 'info')),
+    h('div', {}, h('div', { class: 'tip-title' }, t.title), h('div', { class: 'tip-detail' }, t.detail))))));
 }
 
 // Savings goals: money kept in checking, a slice set aside each payday. Safe-to-spend already leaves it alone.
@@ -849,15 +882,17 @@ function openChartSheet(series, opts, opener) {
 
 // --- Bills
 
-function billRow(b) {
-  const tags = [
+function billTags(b) {
+  return [
     b.paid && statusLine('good', 'Paid'),
     b.covered === false && statusLine('critical', 'Not covered'),
     b.autopay && tag('Autopay'),
     b.estimated && tag('Estimate'),
     b.source === 'detected' && tag('Detected', 'repeat'),
   ];
-  return row(b.name, [`${fmtDay(b.due)} · ${relDay(b.due)}`, tags], (b.estimated ? '~' : '') + money(b.amount_cents));
+}
+function billRow(b) {
+  return row(b.name, [`${fmtDay(b.due)} · ${relDay(b.due)}`, billTags(b)], billAmount(b));
 }
 
 async function screenBills() {

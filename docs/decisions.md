@@ -54,7 +54,7 @@ One line each: what was chosen and why.
 - **An alert's id names one occurrence** (this bill at this amount on this due date, this charge, this outage since the last good sync). Dismissing hides that occurrence only: next month's uncovered bill, a raised bill, a new flagged charge or a fresh outage all show. A consent warning shows again when it turns urgent. Ids are hashed because they go to the browser and can be built from a Plaid item id.
 - **Every alert can be dismissed, even a broken login.** The header's "Stale" line doesn't go through this list, so hidden sync trouble still shows there. With nothing to show the card disappears, since an empty box only takes up room, leaving a quiet "1 alert dismissed" line with a Bring back button while anything live is hidden, and the snapshot gives Claude the count. "Bring back" restores all of them, as a safety net for a mistaken tap.
 
-- **Plan reminders become alerts on their date,** so a dated to-do (check fund payouts, move trip money) shows where the owner already looks and is dismissed like any other alert. One occurrence is the reminder's date and title, so editing either brings it back.
+- **Plan reminders become alerts on their date,** so a dated to-do (check fund payouts, move trip money) shows where the owner already looks and is dismissed like any other alert. One occurrence is the reminder's date and title, so editing either brings it back. Before its date, the next three wait under Coming up on Today beside the bills, so a reminder is visible before it is due without crowding the attention list.
 
 ## Screens
 

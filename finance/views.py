@@ -86,6 +86,7 @@ def today(ctx):
         "spent": spent,
         "recent": _mark_spending(ctx["txns"][:RECENT]),
         "next_bills": [b for b in ctx["upcoming"]["bills"] if not b["paid"]][:3],
+        "reminders_ahead": money.reminders_ahead(ctx["plan"].get("reminders") or [], ctx["today"]),
         "tips": money.tips(ctx["accounts"], ctx["holdings"], ctx["plan"], ctx["txns"], ctx["recurring"],
                            ctx["typical_monthly_cents"], ctx["today"]),
         "last_synced_at": _last_synced(ctx),

@@ -1016,6 +1016,14 @@ def _alert(level, kind, occurrence, title, detail):
     return {"id": f"{kind}:{digest}", "level": level, "kind": kind, "title": title, "detail": detail}
 
 
+REMINDERS_AHEAD = 3
+
+
+def reminders_ahead(reminders, today):
+    """The next few plan reminders after today, soonest first; from their date they move to the attention list."""
+    return sorted((r for r in reminders if r["date"] > today.isoformat()), key=lambda r: r["date"])[:REMINDERS_AHEAD]
+
+
 def alerts(items, upcoming, unusual, now, reminders=()):
     """The attention list at the top of Today, most urgent first.
 
