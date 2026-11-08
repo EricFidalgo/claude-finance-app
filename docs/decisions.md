@@ -24,6 +24,10 @@ One line each: what was chosen and why.
 - **The bills calendar shows this month and next, from the plan's paydays and bills plus detected recurring charges.** A plan bill counts as paid when a matching payment lands from 7 days before its due date to 5 days after (autopay posts early, a manual payment can run late); a detected charge is paid on the days it was charged and projected forward by its cadence. Two months covers "what's left before payday" without guessing at schedules further out.
 - **Tips are worked out from the owner's own numbers, at most three on Today.** A category's pace tip waits until the 8th of the month, because one early grocery run projects to a wild monthly figure; it shows sooner only when the target is already spent.
 - **Consent is estimated at 12 months for Bank of America** because Plaid reports no expiry date for it; the count restarts when Fix login on the Money screen succeeds.
+- **Runway is cash on hand against the plan's monthly costs (bills plus spending targets) once the plan has any, with the typical month from history beside it.** A typical month averages the last three, so a one-off (moving in, a trip) can make the runway look shorter for months; the plan is what the owner means to spend. Without a plan it falls back to the typical month.
+- **A brokerage cash account with holdings (CMA-Edge) shows its total split into cash and invested,** not "available · current". Its available balance is only settled sweep cash, so $34,000 beside $0.59 read as money missing. Any balance beyond the holdings counts as cash.
+- **Spending vs pay sets this calendar month's spending against an average month's take-home (paycheck × paydays a year ÷ 12),** so a three-paycheck month doesn't make an ordinary month look short. The Plan screen lists the coming months that hold an extra paycheck.
+- **A loan is a plan bill with a balance,** not its own list: it already has the amount and due day, and its payments are already matched to it.
 - **Card owed includes pending charges** (limit − available when the bank reports both), because that is what the next statement will ask for.
 
 ## Manual investments
@@ -50,12 +54,15 @@ One line each: what was chosen and why.
 - **An alert's id names one occurrence** (this bill at this amount on this due date, this charge, this outage since the last good sync). Dismissing hides that occurrence only: next month's uncovered bill, a raised bill, a new flagged charge or a fresh outage all show. A consent warning shows again when it turns urgent. Ids are hashed because they go to the browser and can be built from a Plaid item id.
 - **Every alert can be dismissed, even a broken login.** The header's "Stale" line doesn't go through this list, so hidden sync trouble still shows there. With nothing to show the card disappears, since an empty box only takes up room, leaving a quiet "1 alert dismissed" line with a Bring back button while anything live is hidden, and the snapshot gives Claude the count. "Bring back" restores all of them, as a safety net for a mistaken tap.
 
+- **Plan reminders become alerts on their date,** so a dated to-do (check fund payouts, move trip money) shows where the owner already looks and is dismissed like any other alert. One occurrence is the reminder's date and title, so editing either brings it back.
+
 ## Screens
 
 - **Today shows what's been spent today, this week and this pay period (this month without a pay schedule), above the recent transactions.** The owner's first questions on opening the app; each figure opens its transactions. These count a plan bill paid today as spending, as Spending does; the allowance doesn't, so on a bill day it says how much went to bills.
 - **Transactions is its own screen, not a list at the foot of Spending** (`#transactions?period=…` or `?start=&end=`, plus `q`, `category`, `merchant`). Any period or dates, search and filters in one place, opened pre-filtered from Today and Spending. A merchant matches its name exactly, as Top merchants groups, so the totals agree; the search matches any part of a name. The home-screen app has no browser back button, so the screen has its own, and each history entry remembers where it was opened from. Money out that isn't spending (transfers, card payments) is muted, so the rows visibly add up to the total.
 - **On Spending, Top merchants and Flagged start folded:** the owner's call, since every charge is theirs. The folded row still gives the count. Each card stays open or folded while you move around the app, and folds again on a fresh launch.
 - **A chart opens larger in a full-height sheet** (the expand button). Dragging across the chart reads values, and a pull down on its header or a tap outside closes it. This replaces pinch-zoom inside the chart, which fights the page's own scrolling and zoom on a phone.
+- **On Money, balances you have read in a soft green and card balances in a soft red with a minus sign:** the owner's ask, toned below the status colors so a list of numbers stays easy on the eye. The sign and the word "owed" carry the meaning too, so it never rests on color alone.
 - **Charts, bars and tiles can't be selected or copied** (`user-select: none`, no long-press callout or context menu). A long press on a chart reads it; on a bar or tile it's a tap.
 
 ## Security and exposure

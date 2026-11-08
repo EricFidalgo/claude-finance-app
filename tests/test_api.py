@@ -411,3 +411,82 @@ def test_a_goal_saved_from_the_plan_shows_on_today_with_its_payday_slice(app):
     [g] = app.get("/api/today").json()["goals"]
     assert (g["name"], g["status"], g["set_aside_cents"]) == ("Vacation", "saving", 0)
     assert (g["per_payday_cents"], g["next_payday"], g["paydays_left"]) == (20000, "2026-11-06", 5)
+
+
+def test_a_plan_reminder_shows_on_its_date_and_stays_until_dismissed(app):
+    plan = app.get("/api/plan").json()
+    plan["reminders"] = [{"date": "2026-10-29", "title": "Move trip money", "detail": "Take $500 from Merrill cash"},
+                         {"date": "2026-10-20", "title": "Check fund payouts"},
+                         {"date": "2026-12-22", "title": "Sell DODGX and fund the Roth"}]
+    assert app.put("/api/plan", json=plan).status_code == 200
+
+    shown = app.get("/api/alerts").json()["alerts"]
+    assert [(a["kind"], a["title"]) for a in shown] == [("reminder", "Check fund payouts"),
+                                                        ("reminder", "Move trip money")]
+    assert shown[1]["detail"] == "Take $500 from Merrill cash"
+    assert "Sell DODGX and fund the Roth on 2026-12-22" in app.get("/api/snapshot").text  # the plan lists what's ahead
+
+    app.put("/api/alerts/dismissed", json={"id": shown[1]["id"]})
+    assert [a["title"] for a in app.get("/api/alerts").json()["alerts"]] == ["Check fund payouts"]
+
+
+def test_a_reminder_needs_a_date_and_a_title(app):
+    plan = app.get("/api/plan").json()
+    plan["reminders"] = [{"date": "Dec 22", "title": "Sell"}, {"date": "2026-12-08", "title": " "}, "call grandma"]
+    r = app.put("/api/plan", json=plan)
+    assert r.status_code == 400
+    text = " | ".join(r.json()["errors"])
+    assert "reminders[0].date" in text and "reminders[1].title" in text and "reminders[2]" in text
+
+
+def test_a_bill_with_a_balance_is_kept_and_shows_its_payoff_on_bills(app):
+    plan = app.get("/api/plan").json()
+    plan["bills"] = [{"name": "Synchrony", "amount": 176.99, "due_day": 13, "balance": 3832.62,
+                      "balance_as_of": "2026-10-29"}, {"name": "Phone", "amount": 50, "due_day": 1}]
+    assert app.put("/api/plan", json=plan).status_code == 200
+    assert app.get("/api/plan").json()["bills"][0]["balance"] == 3832.62
+    assert "balance" not in app.get("/api/plan").json()["bills"][1]
+
+    [loan] = app.get("/api/bills").json()["loans"]
+    assert (loan["name"], loan["remaining_cents"], loan["payments_left"], loan["payoff"]) == \
+        ("Synchrony", 383262, 22, "2028-08-13")
+    assert "Synchrony balance $3,832.62, paid off about Aug 2028 (22 payments left)" in app.get("/api/snapshot").text
+
+    plan["bills"][0].update(balance=-1, balance_as_of=None)
+    plan["bills"][1]["balance_as_of"] = "2026-10-29"
+    errors = " | ".join(app.put("/api/plan", json=plan).json()["errors"])
+    assert "bills[0].balance" in errors and "bills[0].balance_as_of" in errors and "bills[1].balance" in errors
+
+
+def test_a_manual_funds_cost_basis_is_saved_and_investments_show_how_much_it_is_up(app):
+    doc = {"version": 1, "accounts": [{"name": "Fidelity", "holdings": [
+        {"symbol": "FSPSX", "shares": 100, "cost_basis": 1500}]}]}
+    assert app.put("/api/manual", json=doc).status_code == 200
+    d = app.get("/api/holdings").json()
+    assert d["gains"]["gain_cents"] == 180000 - 150000  # 100 × $18 against $1,500 paid
+    assert "FSPSX: $1,800.00, up $300.00 on $1,500.00 paid" in app.get("/api/snapshot").text
+
+    doc["accounts"][0]["holdings"] = [{"symbol": "TSP:C", "balance": 100, "as_of": "2026-10-28", "cost_basis": 90},
+                                      {"symbol": "FSPSX", "shares": 1, "cost_basis": -3}]
+    errors = " | ".join(app.put("/api/manual", json=doc).json()["errors"])
+    assert "holdings[0].cost_basis" in errors and "holdings[1].cost_basis" in errors
+
+
+def test_screens_show_cash_and_invested_for_merrill_this_months_spending_against_pay_and_extra_paycheck_months(app):
+    [cma] = [a for a in app.get("/api/accounts").json()["accounts"] if a["mask"] == "2222"]
+    assert cma["parts"] == {"cash_cents": 400000, "invested_cents": 600000}  # TTTXX is cash, VTI is invested
+
+    assert app.get("/api/spending").json()["spent_vs_pay"] is None  # no pay schedule yet
+    with_pay(app)
+    month = app.get("/api/spending?period=month").json()
+    vs = month["spent_vs_pay"]
+    assert vs["take_home_cents"] == 520000  # $2,400 × 26 paydays ÷ 12 months
+    assert (vs["spent_cents"], vs["left_cents"]) == (month["total_cents"], 520000 - month["total_cents"])
+
+    extra = app.get("/api/bills").json()["extra_paychecks"]
+    assert [(m["month"], m["paydays"], m["extra_cents"]) for m in extra] == [
+        ("2027-01", ["2027-01-01", "2027-01-15", "2027-01-29"], 240000),
+        ("2027-07", ["2027-07-02", "2027-07-16", "2027-07-30"], 240000)]
+    snap = app.get("/api/snapshot").text
+    assert "Extra paychecks: Jan 2027, Jul 2027" in snap
+    assert "This month: spent" in app.get("/api/snapshot?screen=spending").text

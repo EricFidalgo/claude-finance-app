@@ -13,6 +13,7 @@ FULL = {
     "monthly_spend": {"FOOD_AND_DRINK": 400},
     "buffer": 200,
     "goals": [{"name": "Emergency fund", "target": 6000, "start": "2026-10-01", "by": "2027-06-30"}],
+    "reminders": [{"date": "2026-12-08", "title": "Check fund payouts", "detail": "Look up year-end estimates"}],
 }
 
 

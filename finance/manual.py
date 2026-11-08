@@ -14,7 +14,7 @@ EMPTY = {"version": 1, "accounts": []}
 # A ticker for Yahoo (FSPSX, BRK-B) or a TSP fund (TSP:C, TSP:L 2050, TSP:L Income).
 SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9.^=-]{0,11}|TSP:([GFCSI]|L Income|L 20\d\d)")
 ACCOUNT_FIELDS = {"name", "holdings"}
-HOLDING_FIELDS = {"symbol", "name", "shares", "balance", "as_of", "per_paycheck"}
+HOLDING_FIELDS = {"symbol", "name", "shares", "balance", "as_of", "per_paycheck", "cost_basis"}
 
 
 class ManualError(ValueError):
@@ -52,7 +52,11 @@ def _holding_errors(h, at):
             errors.append(f"{at}.shares must be a number of shares above 0")
         if h.get("per_paycheck") is not None:
             errors.append(f"{at}.per_paycheck goes with a balance, not shares")
+        if h.get("cost_basis") is not None and not _is_amount(h["cost_basis"]):
+            errors.append(f"{at}.cost_basis must be what the shares cost in dollars, 0 or more")
         return errors
+    if h.get("cost_basis") is not None:
+        errors.append(f"{at}.cost_basis goes with shares, not a balance")
     if not _is_amount(h["balance"]):
         errors.append(f"{at}.balance must be a number of dollars, 0 or more")
     if h.get("as_of") is None:

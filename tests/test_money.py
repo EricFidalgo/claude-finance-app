@@ -78,6 +78,12 @@ CARD = a("3333", "credit", "credit card", current=30000, available=165000, limit
 CMA = a("2222", "depository", "cash management", current=1000000, name="CMA-Edge")
 
 
+def test_owed_is_set_for_cards_and_loans_and_empty_for_everything_else():
+    assert money.owed(CARD) == 35000
+    assert money.owed(a("2", "loan", "loan", current=383262)) == 383262
+    assert money.owed(a("3", "depository", "checking", current=150000)) is None
+
+
 def test_card_owed_includes_pending_charges_seen_through_available_credit():
     assert money.card_owed(CARD) == 35000
     assert money.card_owed(a("1", "credit", "credit card", current=30000)) == 30000  # no limit data: current only
@@ -114,6 +120,17 @@ def test_runway_uses_checking_plus_brokerage_cash_minus_card_over_typical_month(
     # 1400 available checking + 3000 cash-like in CMA - 350 owed on the card = 4050 over 1000 a month
     assert r["cash_cents"] == 405000
     assert r["months"] == 4.0
+
+
+def test_runway_measures_cash_against_the_plans_monthly_costs_and_keeps_the_typical_month_beside_it():
+    plan = {**EMPTY_PLAN, "bills": [bill("Rent", 1200, 1), bill("Car", 300, 9)], "monthly_spend": {"FOOD_AND_DRINK": 500}}
+    r = money.runway([CHECKING, CARD, CMA], HOLDINGS, typical_monthly_cents=300000, plan=plan)
+    # $4,050 cash over $1,200 + $300 + $500 = $2,000 planned a month; a $3,000 typical month (move-in costs) gives 1.4
+    assert (r["basis"], r["monthly_cents"], r["months"]) == ("plan", 200000, 2.0)
+    assert (r["typical_monthly_cents"], r["typical_months"]) == (300000, 1.4)
+
+    r = money.runway([CHECKING, CARD, CMA], HOLDINGS, typical_monthly_cents=300000, plan=EMPTY_PLAN)
+    assert (r["basis"], r["monthly_cents"], r["months"]) == ("typical", 300000, 1.4)
 
 
 def test_typical_monthly_spend_averages_complete_months_in_history():
@@ -330,14 +347,15 @@ def test_tips_flag_a_budget_on_pace_to_overrun_a_card_over_30_percent_thin_cash_
     tips = money.tips([CHECKING, maxed], [], plan, txns, recurring, 200000, date(2026, 10, 15))
 
     # food: 240 by the 15th of 31 days is on pace for 496; 60 left over the 16 days to go is 3.75 a day
-    # card: 1000 of 2000 used; 30% is 600. cash: 1400 checking - 1000 card = 400, 0.2 of a 2000 month
+    # card: 1000 of 2000 used; 30% is 600. cash: 1400 checking - 1000 card = 400, 0.2 of the planned 1700 month
     assert [(x["kind"], x["title"], x["detail"]) for x in tips] == [
         ("pace", "Food and drink is on pace for $496 this month",
          "Your target is $300 and $240 is spent. $3.75 a day for the rest of October keeps it on target."),
         ("card", "Card …9999 is 50% used",
          "Paying it under 30% ($600) before the statement closes helps your credit score."),
         ("runway", "Cash covers 0.2 months of spending",
-         "Checking and brokerage cash, less the card, against a typical $2,000 month. Three months is a common cushion."),
+         "Checking and brokerage cash, less the card, against your planned $1,700 month of bills and spending targets. "
+         "Three months is a common cushion."),
         ("subscriptions", "2 repeat charges outside your plan: $26.98 a month",
          "Netflix, Spotify. Add the ones you keep to the plan so safe-to-spend sets them aside."),
     ]
@@ -797,3 +815,73 @@ def test_buffer_months_is_unknown_without_any_planned_costs():
     assert money.buffer_months({"bills": [], "monthly_spend": {}, "buffer": 500})["months"] is None
     assert money.buffer_months({"bills": [{"name": "Rent", "amount": 900, "due_day": 1}], "buffer": None}) == \
         {"buffer_cents": 0, "bills_cents": 90000, "targets_cents": 0, "monthly_cents": 90000, "months": 0.0}
+
+
+def test_a_loan_counts_down_from_its_balance_with_each_payment_to_a_payoff_month():
+    loan = bill("Synchrony", 176.99, 13, category="LOAN_PAYMENTS", balance=3832.62, balance_as_of="2026-11-08")
+    paid = t(17699, "2026-11-13", "LOAN_PAYMENTS", "Synchrony Bank")
+    before = t(17699, "2026-10-13", "LOAN_PAYMENTS", "Synchrony Bank")  # already in the balance
+
+    p = money.loan_payoff(loan, [before], date(2026, 11, 8))
+    # $3,832.62 / $176.99 = 21.65 -> 22 payments, Nov 13 2026 through Aug 13 2028
+    assert (p["remaining_cents"], p["payments_left"], p["payoff"]) == (383262, 22, "2028-08-13")
+
+    p = money.loan_payoff(loan, [before, paid], date(2026, 11, 20))
+    assert (p["paid_cents"], p["remaining_cents"], p["payments_left"]) == (17699, 365563, 21)
+    # 20 full payments from Dec 2026 leave $3,655.63 - $3,539.80 = $115.83 for the last one
+    assert (p["next_due"], p["payoff"], p["last_payment_cents"]) == ("2026-12-13", "2028-08-13", 11583)
+
+
+def test_a_loan_payment_a_few_days_late_still_counts_as_coming():
+    loan = bill("Synchrony", 176.99, 13, category="LOAN_PAYMENTS", balance=3832.62, balance_as_of="2026-11-08")
+    # Nov 13 has passed unpaid, but within the late window it is still the next payment, not a month added on
+    p = money.loan_payoff(loan, [], date(2026, 11, 16))
+    assert (p["payments_left"], p["next_due"], p["payoff"]) == (22, "2026-11-13", "2028-08-13")
+
+
+def test_a_paid_off_loan_has_nothing_left():
+    loan = bill("Phone", 100, 5, balance=150, balance_as_of="2026-09-01")
+    p = money.loan_payoff(loan, [t(10000, "2026-09-05", merchant="Phone"), t(10000, "2026-10-05", merchant="Phone")],
+                          date(2026, 10, 20))
+    assert (p["remaining_cents"], p["payments_left"], p["payoff"]) == (0, 0, "2026-10-05")
+
+
+def test_gains_add_up_what_each_fund_with_a_known_cost_is_up_and_skip_the_rest():
+    doc = {"version": 1, "accounts": [{"name": "Dodge & Cox", "holdings": [
+        {"symbol": "DODGX", "shares": 200, "cost_basis": 43428.09}, {"symbol": "DODFX", "shares": 100}]}]}
+    prices = {"DODGX": [("2026-11-06", 311.20)], "DODFX": [("2026-11-06", 60.00)]}
+    _, holdings = money.manual_holdings(doc, prices, None, date(2026, 11, 8))
+    assert [h["cost_basis_cents"] for h in holdings] == [4342809, None]
+
+    plaid = {**h("VTI", "etf", 600000), "cost_basis_cents": 500000}
+    g = money.gains(holdings + [plaid])
+    # DODGX 200 × $311.20 = $62,240 on $43,428.09; VTI $6,000 on $5,000
+    assert (g["value_cents"], g["cost_basis_cents"], g["gain_cents"]) == (6824000, 4842809, 1981191)
+    assert g["pct"] == 40.9  # $19,811.91 / $48,428.09
+
+
+def test_this_months_spending_is_set_against_an_average_months_take_home_pay():
+    pay = income(amount=2154.94)
+    txns = [t(150000, "2026-11-02", "RENT_AND_UTILITIES", "Encore"), t(4000, "2026-11-07"),
+            t(-215494, "2026-11-06", "INCOME", "DFAS"), t(9999, "2026-10-30")]  # last month's charge doesn't count
+    s = money.spent_vs_pay(txns, pay, date(2026, 11, 8))
+    # $2,154.94 × 26 paychecks ÷ 12 months = $4,669.04
+    assert (s["take_home_cents"], s["spent_cents"], s["left_cents"], s["pct"]) == (466904, 154000, 312904, 33.0)
+    assert money.spent_vs_pay(txns, None, date(2026, 11, 8)) is None
+
+
+def test_months_with_an_extra_paycheck_are_the_ones_with_three_biweekly_paydays():
+    pay = income(amount=2154.94)  # paydays Nov 6, Nov 20, Dec 4, ...
+    months = money.extra_paycheck_months(pay, date(2026, 11, 8))
+    assert [(m["month"], m["paydays"]) for m in months] == [
+        ("2027-01", ["2027-01-01", "2027-01-15", "2027-01-29"]),
+        ("2027-07", ["2027-07-02", "2027-07-16", "2027-07-30"])]
+    assert months[0]["extra_cents"] == 215494
+    assert money.extra_paycheck_months(income(schedule="semimonthly", days=[15, 31]), date(2026, 11, 8)) == []
+
+
+def test_an_account_with_holdings_splits_into_cash_and_invested_and_any_balance_beyond_them_counts_as_cash():
+    assert money.account_parts(CMA, HOLDINGS) == {"cash_cents": 300000, "invested_cents": 700000}
+    assert money.account_parts({**CMA, "current_cents": 1050000}, HOLDINGS) == {"cash_cents": 350000,
+                                                                                 "invested_cents": 700000}
+    assert money.account_parts(CHECKING, HOLDINGS) is None

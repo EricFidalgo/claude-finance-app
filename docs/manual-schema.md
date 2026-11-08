@@ -35,6 +35,7 @@ You enter **shares**, or a **balance in dollars** for an account that reports on
 | `holdings[].balance` | dollars ≥ 0 | The account's value on `as_of`; converted to shares at that day's price. |
 | `holdings[].as_of` | date | Required with `balance`. |
 | `holdings[].per_paycheck` | dollars ≥ 0, optional | With `balance` only: the contribution each payday (your part plus any match). |
+| `holdings[].cost_basis` | dollars ≥ 0, optional | With `shares` only: what the shares cost in all (the fund site's total cost basis). Investing then shows how much the holding, and all holdings with a cost, are up. |
 
 ## How values are worked out
 

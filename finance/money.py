@@ -7,6 +7,7 @@ Conventions (also in CLAUDE.md):
 """
 import calendar
 import hashlib
+import math
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -135,6 +136,11 @@ def card_owed(acct):
     return current
 
 
+def owed(acct):
+    """What a card or loan account is owed, or None for an account that holds money."""
+    return card_owed(acct) if acct.get("type") in LIABILITY_TYPES else None
+
+
 def net_worth(accounts):
     assets = sum(x.get("current_cents") or 0 for x in accounts if x.get("type") in ASSET_TYPES)
     liabilities = sum(card_owed(x) for x in accounts if x.get("type") in LIABILITY_TYPES)
@@ -198,6 +204,19 @@ def cash_cents(accounts, holdings):
     return total - cards_owed_cents(accounts)
 
 
+def account_parts(account, holdings):
+    """An account with holdings (CMA-Edge) as cash and invested. Its available balance is only the settled sweep
+    cash, so it reads as tiny beside the total; the holdings say what the total is made of. Any balance beyond the
+    holdings counts as cash. None for an account without holdings."""
+    mine = [x for x in holdings if x["account_key"] == account["account_key"]]
+    if not mine:
+        return None
+    cash = sum(x.get("value_cents") or 0 for x in mine if bucket_of(x) == "cash")
+    invested = sum(x.get("value_cents") or 0 for x in mine if bucket_of(x) != "cash")
+    extra = max(0, (account.get("current_cents") or 0) - cash - invested)
+    return {"cash_cents": cash + extra, "invested_cents": invested}
+
+
 def typical_monthly_spend(txns, today):
     """Average spending over the last (up to 3) complete calendar months in history, else None."""
     if not txns:
@@ -215,10 +234,19 @@ def typical_monthly_spend(txns, today):
     return round(sum(months) / len(months)) if months else None
 
 
-def runway(accounts, holdings, typical_monthly_cents):
+def runway(accounts, holdings, typical_monthly_cents, plan=None):
+    """Months cash on hand lasts. Measured against the plan's monthly costs (bills plus spending targets) once it
+    has any, since a typical month from history can carry one-offs like moving in; the typical month stays beside it.
+    """
     cash = cash_cents(accounts, holdings)
-    months = round(cash / typical_monthly_cents, 1) if typical_monthly_cents else None
-    return {"cash_cents": cash, "typical_monthly_cents": typical_monthly_cents, "months": months}
+    planned = buffer_months(plan)["monthly_cents"] if plan else 0
+    monthly = planned or typical_monthly_cents
+
+    def months(per):
+        return round(cash / per, 1) if per else None
+    return {"cash_cents": cash, "basis": "plan" if planned else "typical", "monthly_cents": monthly,
+            "months": months(monthly), "typical_monthly_cents": typical_monthly_cents,
+            "typical_months": months(typical_monthly_cents)}
 
 
 # --- plan: payday, bills, safe to spend
@@ -306,6 +334,34 @@ def bill_paid(bill, due, txns):
     """A payment of the bill from a week before the due date to a few days after it."""
     lo, hi = _iso(due - timedelta(days=PAID_EARLY_DAYS)), _iso(due + timedelta(days=PAID_LATE_DAYS))
     return any(lo <= x["date"] <= hi and pays_bill(bill, x) for x in txns)
+
+
+def loan_payoff(bill, txns, today):
+    """A plan bill with a `balance` (as of `balance_as_of`) counts down by each payment posted after that date.
+
+    The rest is paid at the bill amount on its coming due dates (one already paid early is skipped, one a few days
+    late and still unpaid counts as coming); `payoff` is the
+    last payment's date, or the date of the payment that cleared it.
+    """
+    amount = to_cents(bill["amount"])
+    payments = sorted((x for x in txns if x["date"] > bill["balance_as_of"] and pays_bill(bill, x)),
+                      key=lambda x: x["date"])
+    paid = sum(x["amount_cents"] for x in payments)
+    remaining = max(0, to_cents(bill["balance"]) - paid)
+    left = math.ceil(remaining / amount) if amount else None
+    out = {"name": bill["name"], "balance_cents": to_cents(bill["balance"]), "balance_as_of": bill["balance_as_of"],
+           "paid_cents": paid, "remaining_cents": remaining, "payments_left": left, "next_due": None,
+           "payoff": payments[-1]["date"] if payments and not remaining else None,
+           "last_payment_cents": remaining - amount * (left - 1) if left else None}
+    if left:
+        due, n = [], 0
+        while len(due) < left:
+            d = _add_months(today.replace(day=1), n, bill["due_day"])
+            if d >= today - timedelta(days=PAID_LATE_DAYS) and not bill_paid(bill, d, txns):
+                due.append(d)
+            n += 1
+        out.update(next_due=_iso(due[0]), payoff=_iso(due[-1]))
+    return out
 
 
 PAYCHECK_LOOKBACK_DAYS = 3  # a deposit can post a day or two ahead of payday
@@ -484,7 +540,8 @@ def manual_holdings(doc, prices, income, today):
                          "name": h.get("name") or h["symbol"], "type": "mutual fund", "is_cash_equivalent": False,
                          "quantity": float(shares) if shares is not None else None,
                          "value_cents": to_cents(shares * _price(latest)) if priced else None,
-                         "cost_basis_cents": None, "updated_at": latest[0] if priced else None})
+                         "cost_basis_cents": to_cents(h.get("cost_basis")),
+                         "updated_at": latest[0] if priced else None})
         holdings += rows
         accounts.append({"account_key": key, "institution": "Manual", "name": a["name"], "official_name": None,
                          "type": "investment", "subtype": None, "mask": None,
@@ -494,7 +551,44 @@ def manual_holdings(doc, prices, income, today):
     return accounts, holdings
 
 
+def gains(holdings):
+    """What the holdings with a known cost (cost basis: what was paid for them) are worth against that cost."""
+    known = [x for x in holdings if x.get("cost_basis_cents") is not None and x.get("value_cents") is not None]
+    value = sum(x["value_cents"] for x in known)
+    basis = sum(x["cost_basis_cents"] for x in known)
+    return {"value_cents": value, "cost_basis_cents": basis, "gain_cents": value - basis,
+            "pct": _pct(value - basis, basis), "count": len(known)}
+
+
 PAYDAYS_A_YEAR = {"weekly": 52, "biweekly": 26, "semimonthly": 24, "monthly": 12}
+
+
+def spent_vs_pay(txns, income, today):
+    """This calendar month's spending so far against an average month's take-home pay (pay × paydays a year ÷ 12)."""
+    if not income:
+        return None
+    take_home = round(to_cents(income["amount"]) * PAYDAYS_A_YEAR[income["schedule"]] / 12)
+    spent = spending_total([x for x in txns if _in(x, today.replace(day=1), today)])
+    return {"take_home_cents": take_home, "spent_cents": spent, "left_cents": take_home - spent,
+            "pct": _pct(spent, take_home)}
+
+
+USUAL_PAYDAYS = {"weekly": 4, "biweekly": 2}  # a month with more has an extra paycheck
+
+
+def extra_paycheck_months(income, today, months=12):
+    """Months from this one on, over the next `months`, that hold an extra paycheck (3 biweekly or 5 weekly paydays)."""
+    usual = USUAL_PAYDAYS.get(income["schedule"]) if income else None
+    if not usual:
+        return []
+    first = today.replace(day=1)
+    end = _add_months(first, months, 1)
+    by_month, d = defaultdict(list), first - timedelta(days=1)
+    anchored = _anchored_by(income, d)
+    while (d := next_payday(anchored, d)) < end:
+        by_month[f"{d:%Y-%m}"].append(_iso(d))
+    return [{"month": m, "paydays": days, "extra_cents": to_cents(income["amount"]) * (len(days) - usual)}
+            for m, days in sorted(by_month.items()) if len(days) > usual]
 
 
 def yearly_contributions(doc, income):
@@ -824,11 +918,13 @@ def tips(accounts, holdings, plan, txns, recurring, typical_monthly_cents, today
                             "detail": f"Paying it under {UTILIZATION_TIP_PCT}% "
                                       f"({_whole(x['limit_cents'] * UTILIZATION_TIP_PCT / 100)}) before the "
                                       "statement closes helps your credit score."})
-    r = runway(accounts, holdings, typical_monthly_cents)
+    r = runway(accounts, holdings, typical_monthly_cents, plan)
     if r["months"] is not None and r["months"] < RUNWAY_TIP_MONTHS:
+        against = f"your planned {_whole(r['monthly_cents'])} month of bills and spending targets" \
+            if r["basis"] == "plan" else f"a typical {_whole(r['monthly_cents'])} month"
         out.append({"kind": "runway", "title": f"Cash covers {r['months']:g} months of spending",
-                    "detail": "Checking and brokerage cash, less the card, against a typical "
-                              f"{_whole(typical_monthly_cents)} month. Three months is a common cushion."})
+                    "detail": f"Checking and brokerage cash, less the card, against {against}. "
+                              "Three months is a common cushion."})
     declared = plan.get("bills") or []
     per_month = {x["key"]: (x["amount_cents"] if x["fixed"] else x["median_cents"]) * PER_MONTH[x["cadence"]]
                  for x in recurring if not any(_matches(b, x) for b in declared)}
@@ -901,6 +997,11 @@ def consent(item, now):
     return {"expires": _iso(expires), "days_left": (expires - today).days, "estimated": estimated}
 
 
+def month_name(iso):
+    d = date.fromisoformat(iso[:10])
+    return f"{d:%b %Y}"
+
+
 def _day(iso):
     d = date.fromisoformat(iso[:10])
     return f"{d:%a, %b} {d.day}"
@@ -915,15 +1016,19 @@ def _alert(level, kind, occurrence, title, detail):
     return {"id": f"{kind}:{digest}", "level": level, "kind": kind, "title": title, "detail": detail}
 
 
-def alerts(items, upcoming, unusual, now):
+def alerts(items, upcoming, unusual, now, reminders=()):
     """The attention list at the top of Today, most urgent first.
 
     A bank problem is one occurrence until a sync succeeds; a warning that turns urgent is a new one. A flagged charge
     goes by its authorized date, because posting gives a pending charge a new transaction id and often a new date; if
     posting changes its amount or merchant name, it shows once more. Identical charges are numbered, so each is
-    dismissed on its own.
+    dismissed on its own. A plan reminder shows from its date until dismissed, oldest first.
     """
     found = []
+    today = _iso(_when(now).date())
+    for r in sorted((r for r in reminders if r["date"] <= today), key=lambda r: r["date"]):
+        found.append(_alert("warn", "reminder", (r["date"], r["title"]), r["title"],
+                            r.get("detail") or f"From your plan, set for {_day(r['date'])}."))
     for it in items:
         name = it["institution"]
         since = (it["item_id"], it.get("last_synced_at"))

@@ -61,7 +61,8 @@ def status(ctx):
 
 def alerts(ctx):
     """The attention list: what's live and not dismissed, plus how many live ones are hidden."""
-    live = money.alerts(ctx["items"], ctx["upcoming"], ctx["unusual"], ctx["now"].isoformat())
+    live = money.alerts(ctx["items"], ctx["upcoming"], ctx["unusual"], ctx["now"].isoformat(),
+                        ctx["plan"].get("reminders") or [])
     shown = [a for a in live if a["id"] not in ctx["dismissed_alerts"]]
     return {"alerts": shown, "dismissed_count": len(live) - len(shown)}
 
@@ -119,6 +120,7 @@ def spending(ctx, period="month", start=None, end=None):
                   "previous": _cumulative(ctx["txns"], pstart, pend)},
         "targets_cents": {k: money.to_cents(v) for k, v in targets.items()},
         "unusual": ctx["unusual"],
+        "spent_vs_pay": money.spent_vs_pay(ctx["txns"], income, ctx["today"]),
         "last_synced_at": _last_synced(ctx),
     }
 
@@ -133,17 +135,24 @@ def bills(ctx):
         "recurring": [{k: v for k, v in r.items() if k != "dates"} for r in ctx["recurring"]],
         "price_flags": [u for u in ctx["unusual"] if u["kind"] in ("price_change", "higher_than_usual")],
         "declared": ctx["plan"].get("bills") or [],
+        "loans": _loans(ctx["plan"], ctx["txns"], ctx["today"]),
+        "extra_paychecks": money.extra_paycheck_months(ctx["plan"].get("income"), ctx["today"]),
         "last_synced_at": _last_synced(ctx),
     }
 
 
+def _loans(plan, txns, today):
+    return [money.loan_payoff(b, txns, today) for b in plan.get("bills") or [] if b.get("balance") is not None]
+
+
 def accounts(ctx):
-    accts = [{**a, "owed_cents": money.card_owed(a) if a["type"] == "credit" else None} for a in ctx["accounts"]]
+    accts = [{**a, "owed_cents": money.owed(a),
+              "parts": money.account_parts(a, ctx["holdings"])} for a in ctx["accounts"]]
     return {
         "accounts": accts,
         "net_worth": money.net_worth(ctx["accounts"]),
         "cards_owed_cents": money.cards_owed_cents(ctx["accounts"]),
-        "runway": money.runway(ctx["accounts"], ctx["holdings"], ctx["typical_monthly_cents"]),
+        "runway": money.runway(ctx["accounts"], ctx["holdings"], ctx["typical_monthly_cents"], ctx["plan"]),
         "last_synced_at": _last_synced(ctx),
     }
 
@@ -152,6 +161,7 @@ def holdings(ctx):
     return {
         "holdings": [{**h, "bucket": money.bucket_of(h)} for h in ctx["holdings"]],
         "allocation": money.allocation(ctx["holdings"]),
+        "gains": money.gains(ctx["holdings"]),
         "left_to_invest": money.left_to_invest(ctx["accounts"], ctx["holdings"], ctx["plan"], ctx["upcoming"],
                                                ctx["typical_monthly_cents"], ctx["today"]),
         "history": money.portfolio_history(ctx["holdings"], ctx["prices"],
@@ -208,15 +218,26 @@ def _local(ts):
     return datetime.fromisoformat(ts).astimezone().strftime("%Y-%m-%d %H:%M") if ts else "never"
 
 
-def _account_line(a):
+def _account_line(a, holdings):
     mask = f" …{a['mask']}" if a["mask"] else ""
     label = f"{a['name']}{mask} ({a['subtype'] or a['type']})"
     if a["type"] == "credit":
         return f"- {label}: owed {_d(money.card_owed(a))} incl. pending" + \
             (f", limit {_d(a['limit_cents'])}" if a.get("limit_cents") else "")
+    if parts := money.account_parts(a, holdings):
+        return f"- {label}: {_d(a['current_cents'])} (cash {_d(parts['cash_cents'])}, " \
+            f"invested {_d(parts['invested_cents'])})"
     if a.get("available_cents") is not None and a["available_cents"] != a["current_cents"]:
         return f"- {label}: {_d(a['available_cents'])} available, {_d(a['current_cents'])} current"
     return f"- {label}: {_d(a['current_cents'])}"
+
+
+def _holding_line(h):
+    line = f"- {h.get('ticker') or h.get('name')}: {_d(h['value_cents'])}"
+    if h.get("cost_basis_cents") is not None and h["value_cents"] is not None:
+        gain = h["value_cents"] - h["cost_basis_cents"]
+        line += f", {'up' if gain >= 0 else 'down'} {_d(abs(gain))} on {_d(h['cost_basis_cents'])} paid"
+    return line
 
 
 def _period_line(ctx, period, title):
@@ -244,7 +265,10 @@ def _screen_lines(ctx, screen):
         income = ctx["plan"].get("income")
         period = screen if screen in PERIODS and (income or screen != "pay_period") else "month"
         s = money.spend_summary(ctx["txns"], period, ctx["today"], income)
-        return [f"Spending transactions {s['start']} to {s['end']} (amount, + is money out):"] + \
+        vs = money.spent_vs_pay(ctx["txns"], income, ctx["today"])
+        head = [f"This month: spent {_d(vs['spent_cents'])} of an average month's take-home pay "
+                f"{_d(vs['take_home_cents'])} ({vs['pct']}%), {_d(vs['left_cents'])} left"] if vs else []
+        return head + [f"Spending transactions {s['start']} to {s['end']} (amount, + is money out):"] + \
             [_txn_line(t) for t in s["transactions"][:80]]
     if screen == "bills":
         return ["Bills, next 35 days:"] + [
@@ -253,9 +277,12 @@ def _screen_lines(ctx, screen):
             f"{'' if b['covered'] is None else ' covered' if b['covered'] else ' NOT covered by checking'}"
             for b in ctx["upcoming"]["bills"]]
     if screen == "money":
-        r = money.runway(ctx["accounts"], ctx["holdings"], ctx["typical_monthly_cents"])
-        return [f"Cash on hand {_d(r['cash_cents'])}, typical monthly spend {_d(r['typical_monthly_cents'])}, "
-                f"runway {r['months']} months"]
+        r = money.runway(ctx["accounts"], ctx["holdings"], ctx["typical_monthly_cents"], ctx["plan"])
+        against = "planned monthly costs (bills + spending targets)" if r["basis"] == "plan" else "typical monthly spend"
+        line = f"Cash on hand {_d(r['cash_cents'])}, {against} {_d(r['monthly_cents'])}, runway {r['months']} months"
+        if r["basis"] == "plan" and r["typical_months"] is not None:
+            line += f" ({r['typical_months']} against the typical month of {_d(r['typical_monthly_cents'])})"
+        return [line]
     if screen == "investing":
         li = money.left_to_invest(ctx["accounts"], ctx["holdings"], ctx["plan"], ctx["upcoming"],
                                   ctx["typical_monthly_cents"], ctx["today"])
@@ -264,12 +291,25 @@ def _screen_lines(ctx, screen):
     return []
 
 
-def _plan_lines(plan, today):
+def _loan_line(p):
+    line = f"- {p['name']} balance {_d(p['remaining_cents'])}"
+    if not p["remaining_cents"]:
+        return line + f", paid off {p['payoff'] or ''}".rstrip()
+    if p["payoff"]:
+        line += f", paid off about {money.month_name(p['payoff'])} ({p['payments_left']} payments left)"
+    return line
+
+
+def _plan_lines(plan, today, txns):
     inc = plan.get("income")
     out = [f"- Income: {_d(money.to_cents(inc['amount']))} {inc['schedule']}, next payday {inc['next_payday']}"
            if inc else "- Income: not set"]
+    if extra := money.extra_paycheck_months(inc, today):
+        out.append("- Extra paychecks: " + ", ".join(money.month_name(m["month"] + "-01") for m in extra)
+                   + f" (one paycheck more than usual, {_d(extra[0]['extra_cents'])})")
     out.append("- Bills: " + ("; ".join(f"{b['name']} {_d(money.to_cents(b['amount']))} on day {b['due_day']}"
                                         for b in plan.get("bills") or []) or "none listed"))
+    out += [_loan_line(p) for p in _loans(plan, txns, today)]
     buf = money.buffer_months(plan)
     line = f"- Buffer: {_d(buf['buffer_cents']) if plan.get('buffer') is not None else 'not set'}"
     if plan.get("buffer") is not None and buf["months"] is not None:
@@ -289,6 +329,9 @@ def _plan_lines(plan, today):
         elif p["status"] == "ready":
             line += ", date reached: its money is free to spend"
         out.append(line)
+    for r in sorted(plan.get("reminders") or [], key=lambda r: r["date"]):
+        if r["date"] > today.isoformat():  # due ones show under Needs attention
+            out.append(f"- Reminder: {r['title']} on {r['date']}" + (f". {r['detail']}" if r.get("detail") else ""))
     return out
 
 
@@ -302,7 +345,7 @@ def snapshot(ctx, screen=None):
         "credit-card payments; refunds net in; pending counts.",
         "",
         "Accounts",
-        *[_account_line(a) for a in ctx["accounts"]],
+        *[_account_line(a, ctx["holdings"]) for a in ctx["accounts"]],
         f"- Net worth {_d(nw['net_cents'])} (assets {_d(nw['assets_cents'])} − card owed {_d(nw['liabilities_cents'])})",
         "",
         "Spending this month and recent periods",
@@ -327,10 +370,10 @@ def snapshot(ctx, screen=None):
         "",
         "Holdings",
         f"- Total {_d(alloc['total_cents'])}: " + ", ".join(f"{b['bucket']} {b['pct']}%" for b in alloc["buckets"]),
-        *[f"- {h.get('ticker') or h.get('name')}: {_d(h['value_cents'])}" for h in ctx["holdings"][:12]],
+        *[_holding_line(h) for h in ctx["holdings"][:12]],
         "",
         "Plan",
-        *_plan_lines(ctx["plan"], ctx["today"]),
+        *_plan_lines(ctx["plan"], ctx["today"], ctx["txns"]),
     ]
     attention = alerts(ctx)
     if attention["alerts"] or attention["dismissed_count"]:

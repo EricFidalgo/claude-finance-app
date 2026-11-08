@@ -98,17 +98,23 @@ def demo_plan():
             "income": {"amount": 2450, "schedule": "semimonthly", "next_payday": nxt.isoformat(), "days": [15, 31]},
             "bills": [{"name": "Parkview Apartments", "amount": 1650, "due_day": 1, "account": "0001",
                        "category": "RENT_AND_UTILITIES", "autopay": True},
-                      {"name": "City Power", "amount": 70, "due_day": 18, "fixed": False}],
+                      {"name": "City Power", "amount": 70, "due_day": 18, "fixed": False},
+                      {"name": "Furniture loan", "amount": 120, "due_day": 13, "balance": 2280,
+                       "balance_as_of": (TODAY - timedelta(days=10)).isoformat()}],
             "monthly_spend": {"FOOD_AND_DRINK": 700, "GENERAL_MERCHANDISE": 250},
             "buffer": 200,
             "goals": [{"name": "Vacation", "target": 1000, "start": (TODAY - timedelta(days=30)).isoformat(),
                        "by": (TODAY + timedelta(days=60)).isoformat()},
-                      {"name": "Emergency fund", "target": 15000}]}  # no date: shows how to start one
+                      {"name": "Emergency fund", "target": 15000}],  # no date: shows how to start one
+            "reminders": [{"date": TODAY.isoformat(), "title": "Check fund payout estimates",
+                           "detail": "Look up the year-end distribution estimates before selling."},
+                          {"date": (TODAY + timedelta(days=14)).isoformat(), "title": "Move trip money", "detail": None}]}
 
 
 def demo_manual():
     return {"version": 1, "accounts": [
-        {"name": "Vanguard IRA", "holdings": [{"symbol": "VFIAX", "name": "Vanguard 500 Index Admiral", "shares": 41.2}]},
+        {"name": "Vanguard IRA", "holdings": [{"symbol": "VFIAX", "name": "Vanguard 500 Index Admiral", "shares": 41.2,
+                                               "cost_basis": 15400}]},
         {"name": "TSP", "holdings": [{"symbol": "TSP:C", "name": "TSP C Fund", "balance": 8200,
                                       "as_of": (TODAY - timedelta(days=3)).isoformat(), "per_paycheck": 250}]}]}
 

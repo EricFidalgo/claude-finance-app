@@ -171,7 +171,8 @@ function row(title, sub, amount, amountSub) {
     h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, title),
       // adjacent strings would merge into one flex item, so each gets its own span to keep the gap between them
       sub && h('div', { class: 'row-sub' }, [sub].flat().map((x) => (typeof x === 'string' ? h('span', {}, x) : x)))),
-    amount != null && h('div', { class: 'row-amt' }, amount, amountSub && h('span', { class: 'sub' }, amountSub)));
+    amount != null && h('div', { class: 'row-amt' }, h('span', { class: 'amt' }, amount),
+      amountSub && h('span', { class: 'sub' }, amountSub)));
 }
 function tag(text, iconName) {
   return h('span', { class: 'tag' }, iconName && icon(iconName), text);
@@ -464,7 +465,7 @@ async function screenSpending() {
     p !== 'today' && h('p', { class: 'sub range-note' }, fmtRange(d.start, d.end)),
     h('a', { class: 'link-row', href: txnHash(view) }, 'See transactions', icon('right')));
 
-  const out = [picker, hero];
+  const out = [picker, hero, payCard(d.spent_vs_pay)];
   if (info.series) {
     out.push(card('Running total',
       lineChart([
@@ -489,6 +490,21 @@ async function screenSpending() {
       d.unusual.map((u) => row(u.merchant, [statusLine('warning', u.detail), fmtShort(u.date)], money(u.amount_cents))))));
   }
   return out;
+}
+
+// This calendar month's spending so far against an average month's take-home pay, whatever period is picked.
+function payCard(v) {
+  if (!v) return null;
+  const fill = h('div', { class: 'gauge-fill' });
+  fill.style.width = `${Math.min(100, v.pct)}%`;
+  const over = v.left_cents < 0;
+  return card('This month vs your pay',
+    h('div', { class: 'gauge-legend goal-head' }, h('b', {}, `${money0(v.spent_cents)} spent`),
+      h('span', {}, `of ${money0(v.take_home_cents)} · ${Math.round(v.pct)}%`)),
+    h('div', { class: 'gauge', role: 'img', 'aria-label': `${money0(v.spent_cents)} of ${money0(v.take_home_cents)} spent` }, fill),
+    h('p', { class: 'sub' }, over
+      ? `${money0(-v.left_cents)} more than an average month's take-home pay.`
+      : `${money0(v.left_cents)} left of an average month's take-home pay. Bills and rent count; transfers and savings don't.`));
 }
 
 // A row that opens somewhere: the title is the link, and the whole row is its tap target.
@@ -875,12 +891,25 @@ async function screenBills() {
           ? tag('In plan', 'check')
           : h('button', { class: 'btn small', type: 'button', 'aria-label': `Add ${r.merchant} to plan`, onclick: (e) => addBill(r, e.currentTarget) }, 'Add')))));
 
-  const out = [hero, calendarCard(d.calendar), timeline, recurring];
+  const out = [hero, calendarCard(d.calendar), timeline, loansCard(d.loans), recurring];
   if (d.price_flags.length) {
     out.push(card('Price changes', h('ul', { class: 'rows' },
       d.price_flags.map((u) => row(u.merchant, [statusLine('warning', u.detail), fmtShort(u.date)], money(u.amount_cents))))));
   }
   return out;
+}
+
+// Bills with a balance in the plan count down with each payment to a payoff month.
+const MON_YEAR = new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' });
+function loansCard(loans) {
+  if (!loans.length) return null;
+  return card('Loans', h('ul', { class: 'rows' }, loans.map((l) => {
+    if (!l.remaining_cents) return row(l.name, statusLine('good', 'Paid off'), money(0));
+    const usual = l.payments_left > 1 ? (l.remaining_cents - l.last_payment_cents) / (l.payments_left - 1) : null;
+    const last = usual != null && l.last_payment_cents !== usual ? ` · last one ${money(l.last_payment_cents)}` : '';
+    return row(l.name, [l.payoff ? `Paid off about ${MON_YEAR.format(parseDay(l.payoff))}` : 'No payoff date',
+      `${plural(l.payments_left, 'payment')} left${last}`], money(l.remaining_cents), 'left');
+  })), h('p', { class: 'sub' }, 'Counts down from the balance in your plan with each payment that posts.'));
 }
 
 // A month grid: paydays are squares, bills are dots (hollow once paid), so shape carries the meaning and color
@@ -975,25 +1004,42 @@ async function screenMoney() {
     h('p', { class: 'hero' }, money0(nw.net_cents)),
     h('p', { class: 'hero-sub' }, `${money0(nw.assets_cents)} in accounts − ${money0(nw.liabilities_cents)} owed on cards`));
 
+  // Cash and investments read in a soft green, card balances in a soft red with a minus sign, so the sign
+  // and the word "owed" carry the meaning too.
+  const tone = (el, cls) => { el.classList.add(cls); return el; };
   const accounts = card('Accounts', h('ul', { class: 'rows' }, d.accounts.map((a) => {
     const title = a.mask ? `${a.name} …${a.mask}` : a.name;  // accounts typed into manual.json have no mask
-    if (a.type === 'credit') {
+    const kind = `${a.institution} · ${a.subtype || a.type}`;
+    if (a.owed_cents != null) {  // cards and loans
       const used = a.limit_cents ? Math.round((100 * a.owed_cents) / a.limit_cents) : null;
-      return row(title, `${a.institution} · credit card`, money(a.owed_cents),
+      const r = row(title, `${a.institution} · ${a.type === 'credit' ? 'credit card' : 'loan'}`, money(a.owed_cents ? -a.owed_cents : 0),
         used != null ? `owed · ${used}% of ${money0(a.limit_cents)}` : 'owed');
+      return a.owed_cents > 0 ? tone(r, 'amt-neg') : r;
+    }
+    // A brokerage cash account (CMA-Edge) reports a tiny "available" (settled cash only) beside its total;
+    // its holdings say what the total is made of.
+    if (a.parts) {
+      const { cash_cents: cash, invested_cents: invested } = a.parts;
+      return tone(row(title, kind, money(a.current_cents),
+        cash && invested ? `cash ${money0(cash)} · invested ${money0(invested)}` : cash ? 'cash' : 'invested'), 'amt-pos');
     }
     if (a.available_cents != null && a.available_cents !== a.current_cents) {
-      return row(title, `${a.institution} · ${a.subtype || a.type}`, money(a.available_cents), `available · ${money(a.current_cents)} current`);
+      return tone(row(title, kind, money(a.available_cents), `available · ${money(a.current_cents)} current`), 'amt-pos');
     }
-    return row(title, `${a.institution} · ${a.subtype || a.type}`, money(a.current_cents));
+    return tone(row(title, kind, money(a.current_cents)), 'amt-pos');
   })));
 
   const r = d.runway;
+  const runwayNote = r.basis === 'plan'
+    ? [`Cash on hand ${money0(r.cash_cents)} against your planned ${money0(r.monthly_cents)} a month of bills and spending targets.`,
+      r.typical_months != null && h('span', { class: 'block' },
+        `At a typical month from history (${money0(r.typical_monthly_cents)}), ${r.typical_months} months.`)]
+    : [`Cash on hand ${money0(r.cash_cents)} at a typical ${money0(r.monthly_cents)} a month of spending.`];
   const runway = card('Runway',
-    r.typical_monthly_cents
+    r.months != null
       ? [h('p', { class: 'hero' }, `${r.months} `, h('small', {}, r.months === 1 ? 'month' : 'months')),
-        h('p', { class: 'hero-sub' }, `Cash on hand ${money0(r.cash_cents)} at a typical ${money0(r.typical_monthly_cents)} a month of spending.`)]
-      : h('p', { class: 'empty' }, 'Needs a full month of spending history.'));
+        h('p', { class: 'hero-sub' }, runwayNote)]
+      : h('p', { class: 'empty' }, 'Needs a plan with bills, or a full month of spending history.'));
 
   const links = card('Connections',
     st.items.length ? h('ul', { class: 'rows' }, st.items.map(connectionRow)) : h('p', { class: 'empty' }, 'Nothing linked yet.'),
@@ -1080,6 +1126,15 @@ async function removeConnection(it, btn) {
 
 // --- Investing
 
+// What the funds with a known cost are up (or down) against what was paid for them.
+function gainLine(g) {
+  if (!g.count) return null;
+  const up = g.gain_cents >= 0;
+  return h('p', { class: `hero-sub gain ${up ? 'amt-pos' : 'amt-neg'}` },
+    h('span', { class: 'amt' }, `${up ? 'Up' : 'Down'} ${money0(Math.abs(g.gain_cents))} (${up ? '+' : '−'}${Math.abs(g.pct)}%)`),
+    ` on the ${money0(g.cost_basis_cents)} you paid${g.count > 1 ? ` for those ${g.count}` : ''}`);
+}
+
 async function screenInvesting() {
   const d = await api('/api/holdings');
   setSynced(d.last_synced_at);
@@ -1087,7 +1142,8 @@ async function screenInvesting() {
   const hero = card(null,
     h('p', { class: 'hero-label' }, 'Investments'),
     h('p', { class: 'hero' }, money0(a.total_cents)),
-    h('p', { class: 'hero-sub' }, `${money0(a.invested_cents)} invested · ${money0(a.idle_cash_cents)} in cash`));
+    h('p', { class: 'hero-sub' }, `${money0(a.invested_cents)} invested · ${money0(a.idle_cash_cents)} in cash`),
+    gainLine(d.gains));
 
   const byBucket = Object.fromEntries(a.buckets.map((b) => [b.bucket, b]));
   const present = BUCKETS.filter(([k]) => byBucket[k]);
@@ -1229,7 +1285,7 @@ function ord(n) {
 const BUFFER_MONTHS = [1, 2, 3, 6];
 
 async function screenPlan() {
-  const [plan, status] = await Promise.all([api('/api/plan'), api('/api/status')]);
+  const [plan, status, due] = await Promise.all([api('/api/plan'), api('/api/status'), api('/api/bills')]);
   setSynced(status.last_synced_at);
   const inc = plan.income || {};
   const f = {
@@ -1253,18 +1309,27 @@ async function screenPlan() {
       due: num(b.due_day, { inputmode: 'numeric', name: 'bill-due-day', placeholder: '1' }),
       autopay: h('input', { type: 'checkbox', name: 'bill-autopay', checked: !!b.autopay }),
       varies: h('input', { type: 'checkbox', name: 'bill-varies', checked: b.fixed === false }),
+      balance: num(b.balance, { name: 'bill-balance', placeholder: 'Only for a loan' }),
+    };
+    // A loan's balance is dated the day it's typed, so payments after that count it down.
+    const readBalance = () => {
+      const balance = readNum(el.balance);
+      if (balance == null) return { balance: null, balance_as_of: null };
+      return { balance, balance_as_of: balance === b.balance && b.balance_as_of ? b.balance_as_of : isoOf(todayDate()) };
     };
     return {
       node: [field('Name', el.name), h('div', { class: 'field-row' }, field('Amount ($)', el.amount), field('Due day (1–31)', el.due)),
         h('label', { class: 'check' }, el.autopay, 'Paid automatically'),
-        h('label', { class: 'check' }, el.varies, 'Amount changes month to month')],
+        h('label', { class: 'check' }, el.varies, 'Amount changes month to month'),
+        field('Balance left on the loan ($, optional)', el.balance)],
       read: () => ({ ...b, name: el.name.value.trim(), amount: readNum(el.amount), due_day: readNum(el.due),
-        autopay: el.autopay.checked, fixed: !el.varies.checked }),
+        autopay: el.autopay.checked, fixed: !el.varies.checked, ...readBalance() }),
       summary: () => {
         const due = readNum(el.due);
         return { title: el.name.value.trim() || 'New bill',
           sub: [Number.isInteger(due) && due >= 1 && due <= 31 ? `due ${ord(due)}` : 'no due day',
-            el.autopay.checked && 'autopay', el.varies.checked && 'varies'].filter(Boolean).join(' · '),
+            el.autopay.checked && 'autopay', el.varies.checked && 'varies',
+            readNum(el.balance) != null && `${money0(cents(readNum(el.balance)))} left`].filter(Boolean).join(' · '),
           amount: readNum(el.amount) == null ? '' : (el.varies.checked ? '~' : '') + money(cents(readNum(el.amount))) };
       },
     };
@@ -1292,16 +1357,31 @@ async function screenPlan() {
         amount: readNum(el.target) == null ? '' : money0(cents(readNum(el.target))) }) };
   });
 
+  const reminders = repeater(plan.reminders, 'Add reminder', (r = {}) => {
+    const el = {
+      date: h('input', { type: 'date', name: 'reminder-date', value: r.date || '' }),
+      title: h('input', { type: 'text', name: 'reminder-title', value: r.title || '', autocomplete: 'off', placeholder: 'Move trip money…' }),
+      detail: h('textarea', { name: 'reminder-detail', rows: 3, placeholder: 'What to do, in a sentence or two…' }),
+    };
+    el.detail.value = r.detail || '';
+    return { node: [field('Title', el.title), field('On', el.date), field('Details (optional)', el.detail)],
+      read: () => ({ ...r, date: el.date.value || null, title: el.title.value.trim(), detail: el.detail.value.trim() || null }),
+      summary: () => ({ title: el.title.value.trim() || 'New reminder',
+        sub: el.date.value ? YEAR_FMT.format(parseDay(el.date.value)) : 'no date yet', amount: '' }) };
+  });
+
   // Each folded section's header keeps a live count and total, so a closed section still says what's in it.
-  const billsNote = h('span', {}), targetsNote = h('span', {}), goalsNote = h('span', {});
+  const billsNote = h('span', {}), targetsNote = h('span', {}), goalsNote = h('span', {}), remindersNote = h('span', {});
   const sumOf = (xs) => xs.reduce((a, x) => a + cents(Number.isFinite(x) ? x : 0), 0);
   const buffer = bufferPanel(f.buffer);
   function refresh() {
-    const b = bills.read(), t = targets.read(), g = goals.read();
+    const b = bills.read(), t = targets.read(), g = goals.read(), r = reminders.read();
     const billsC = sumOf(b.map((x) => x.amount)), targetsC = sumOf(t.map(([, v]) => v));
     billsNote.textContent = b.length ? `${plural(b.length, 'bill')} · ${money0(billsC)}/mo` : 'None yet';
     targetsNote.textContent = t.length ? `${t.length} · ${money0(targetsC)}/mo` : 'None yet';
     goalsNote.textContent = g.length ? `${plural(g.length, 'goal')} · ${money0(sumOf(g.map((x) => x.target)))}` : 'None yet';
+    const soon = r.map((x) => x.date).filter(Boolean).sort()[0];
+    remindersNote.textContent = r.length ? `${r.length}${soon ? ` · next ${fmtShort(soon)}` : ''}` : 'None yet';
     buffer.update(billsC, targetsC);
   }
 
@@ -1312,8 +1392,10 @@ async function screenPlan() {
       h('p', { class: 'sub' }, 'What you mean to spend per category each month. Shown as marks on Spending.'), targets.node),
     goals: planFold('plan-goals', 'Goals', goalsNote,
       h('p', { class: 'sub' }, 'Money to build up in checking. Each payday sets aside an equal slice, and safe-to-spend leaves it alone. On the date, it is yours to spend.'), goals.node),
+    reminders: planFold('plan-reminders', 'Reminders', remindersNote,
+      h('p', { class: 'sub' }, 'Shows under Needs attention on Today from its date until you dismiss it.'), reminders.node),
   };
-  const lists = { bills, goals };
+  const lists = { bills, goals, reminders };
 
   const errors = h('div', { role: 'alert' });
   const save = h('button', { class: 'btn primary', type: 'submit' }, 'Save plan');
@@ -1331,6 +1413,7 @@ async function screenPlan() {
       bills: bills.read(),
       monthly_spend: Object.fromEntries(targets.read().filter(([, v]) => v != null)),
       goals: goals.read(),
+      reminders: reminders.read(),
     };
     save.disabled = true;
     save.textContent = 'Saving…';
@@ -1343,7 +1426,7 @@ async function screenPlan() {
       const list = err.body?.errors || [err.message];
       // Open whatever a problem points at (bills[2].due_day opens Bills and its third bill), so it can be fixed.
       for (const msg of list) {
-        const m = /^(bills|monthly_spend|goals)(?:\[(\d+)\])?/.exec(msg);
+        const m = /^(bills|monthly_spend|goals|reminders)(?:\[(\d+)\])?/.exec(msg);
         if (!m) continue;
         sections[m[1]].open();
         if (m[2] != null) lists[m[1]]?.open(+m[2]);
@@ -1358,11 +1441,15 @@ async function screenPlan() {
   errors,
   card('Income', h('p', { class: 'sub' }, 'Your take-home pay. Safe-to-spend counts down to the next payday.'),
     h('div', { class: 'field-row' }, field('Each paycheck ($)', f.amount), field('Paid', f.schedule)),
-    field('Next payday', f.payday), days),
+    field('Next payday', f.payday), days,
+    due.extra_paychecks.length > 0 && h('p', { class: 'sub' },
+      `Months with an extra paycheck: ${due.extra_paychecks.map((m) => MON_YEAR.format(parseDay(m.month + '-01'))).join(', ')}. `
+      + `That's ${money0(due.extra_paychecks[0].extra_cents)} more than a usual month.`)),
   sections.bills.node,
   sections.monthly_spend.node,
   buffer.node,
   sections.goals.node,
+  sections.reminders.node,
   h('div', { class: 'save-bar' }, save));
   refresh();
   return [form];

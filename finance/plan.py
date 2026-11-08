@@ -9,9 +9,11 @@ from datetime import date
 
 from . import config, money
 
-EMPTY_PLAN = {"version": 1, "income": None, "bills": [], "monthly_spend": {}, "buffer": None, "goals": []}
+EMPTY_PLAN = {"version": 1, "income": None, "bills": [], "monthly_spend": {}, "buffer": None, "goals": [],
+              "reminders": []}
 SCHEDULES = ("weekly", "biweekly", "semimonthly", "monthly")
 BILL_DEFAULTS = {"account": None, "category": None, "autopay": False, "fixed": True}
+LOAN_FIELDS = ("balance", "balance_as_of")  # optional, kept only when set
 
 
 class PlanError(ValueError):
@@ -40,9 +42,11 @@ def normalize(p: dict) -> dict:
     """Fill in optional fields so readers can rely on every key being present."""
     out = {**_empty(), **p}
     out["bills"] = [{**{k: b.get(k) for k in ("name", "amount", "due_day")}, **BILL_DEFAULTS,
-                     **{k: v for k, v in b.items() if k in BILL_DEFAULTS and v is not None}} for b in out["bills"] or []]
+                     **{k: v for k, v in b.items() if (k in BILL_DEFAULTS or k in LOAN_FIELDS) and v is not None}}
+                    for b in out["bills"] or []]
     out["monthly_spend"] = out["monthly_spend"] or {}
     out["goals"] = out["goals"] or []
+    out["reminders"] = out["reminders"] or []
     return out
 
 
@@ -90,6 +94,11 @@ def validate(p) -> list:
                 errors.append(f"bills[{i}].amount must be a number of dollars, 0 or more")
             if not (isinstance(b.get("due_day"), int) and not isinstance(b["due_day"], bool) and 1 <= b["due_day"] <= 31):
                 errors.append(f"bills[{i}].due_day must be a day of the month, 1-31")
+            if b.get("balance") is not None or b.get("balance_as_of") is not None:
+                if not _is_amount(b.get("balance")):
+                    errors.append(f"bills[{i}].balance must be what's left to pay in dollars, 0 or more")
+                if not _is_date(b.get("balance_as_of")):
+                    errors.append(f"bills[{i}].balance_as_of must be the balance's date, like 2026-11-08")
             for flag in ("autopay", "fixed"):
                 if b.get(flag) is not None and not isinstance(b[flag], bool):
                     errors.append(f"bills[{i}].{flag} must be true or false")
@@ -107,6 +116,20 @@ def validate(p) -> list:
             errors.append(f"goals[{i}].start must be a date like 2026-11-08")
         elif g.get("saved") is not None and not _is_amount(g["saved"]):
             errors.append(f"goals[{i}].saved must be a number of dollars, 0 or more")
+    reminders = p.get("reminders") or []
+    if not isinstance(reminders, list):
+        errors.append("reminders must be a list")
+        reminders = []
+    for i, r in enumerate(reminders):
+        if not isinstance(r, dict):
+            errors.append(f"reminders[{i}] must be an object with a date and a title")
+            continue
+        if not _is_date(r.get("date")):
+            errors.append(f"reminders[{i}].date must be a date like 2026-12-08")
+        if not isinstance(r.get("title"), str) or not r["title"].strip():
+            errors.append(f"reminders[{i}].title is required")
+        if r.get("detail") is not None and not isinstance(r["detail"], str):
+            errors.append(f"reminders[{i}].detail must be text")
     return errors
 
 

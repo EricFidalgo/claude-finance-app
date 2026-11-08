@@ -19,6 +19,9 @@
   --warning: #fab219;
   --serious: #ec835a;
   --critical: #d03b3b;
+  /* Money you have and money you owe, as text. Softer than the status colors so a list of balances stays calm. */
+  --pos: #2e7a4c;
+  --neg: #b2463f;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.04);
   --radius: 16px;
   --tabs-h: 56px;
@@ -40,6 +43,8 @@
     --s4: #c98500;
     --s5: #d55181;
     --shadow: none;
+    --pos: #7cc095;
+    --neg: #e8877f;
   }
 }
 
@@ -164,6 +169,11 @@ p { margin: 0 0 8px; }
 .row-amt { text-align: right; white-space: nowrap; font-weight: 600; }
 .row-amt .sub { display: block; font-weight: 400; }
 .amt-in { color: var(--good); }
+.row-amt .amt { display: block; }
+.hero-sub .block { display: block; margin-top: 4px; }
+.amt-pos .amt { color: var(--pos); }
+.amt-neg .amt { color: var(--neg); }
+.gain .amt { display: inline; font-weight: 600; }
 .day-head {
   font-size: 0.78rem; font-weight: 600; color: var(--ink-2); padding: 14px 0 4px;
   text-transform: uppercase; letter-spacing: 0.04em;
@@ -281,7 +291,7 @@ details[open] > summary::after { content: " ▴"; }
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .btn.small { min-height: 36px; padding: 0 12px; font-size: 0.85rem; }
 .btn[disabled] { opacity: 0.5; cursor: default; }
-input[type="search"], input[type="text"], input[type="number"], input[type="date"], select {
+input[type="search"], input[type="text"], input[type="number"], input[type="date"], select, textarea {
   width: 100%; min-height: 44px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line);
   background: var(--page); font-size: 1rem;
 }
