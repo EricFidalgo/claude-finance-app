@@ -321,6 +321,14 @@ def test_snapshot_of_the_pay_period_screen_falls_back_to_the_month_until_there_i
     assert "- Since payday (2026-10-23 to 2026-10-29): $30.00" in text
 
 
+def test_snapshot_says_how_many_months_of_planned_costs_the_buffer_covers(app):
+    plan = app.get("/api/plan").json()
+    plan.update(buffer=4500, bills=[{"name": "Rent", "amount": 1200, "due_day": 1}], monthly_spend={"FOOD_AND_DRINK": 300})
+    assert app.put("/api/plan", json=plan).status_code == 200
+    assert "- Buffer: $4,500.00, 3.0 months of planned costs ($1,500.00 a month: bills $1,200.00 + spending targets $300.00)" \
+        in app.get("/api/snapshot").text
+
+
 def test_no_endpoint_ever_returns_a_token_or_key(app, monkeypatch):
     secrets = [BOA_TOKEN, MERRILL_TOKEN, "access-"]
     monkeypatch.setenv("PLAID_SECRET", "prod-secret-value-xyz")
@@ -391,3 +399,15 @@ def test_scheduler_retries_every_few_minutes_while_plaid_prepares_then_every_six
     with pytest.raises(Done):
         asyncio.run(web.scheduler(app))
     assert [(t - NOW) / timedelta(minutes=1) for t in runs] == [0, 5, 10, 370, 730]
+
+
+def test_a_goal_saved_from_the_plan_shows_on_today_with_its_payday_slice(app):
+    with_pay(app)
+    plan = app.get("/api/plan").json()
+    plan["goals"] = [{"name": "Vacation", "target": 1000, "by": "2027-01-15"}]
+    assert app.put("/api/plan", json=plan).json()["goals"][0]["start"] == "2026-10-29"
+
+    # Paydays from Oct 29 up to Jan 15: Nov 6, Nov 20, Dec 4, Dec 18, Jan 1 -> $1,000 / 5 = $200 each
+    [g] = app.get("/api/today").json()["goals"]
+    assert (g["name"], g["status"], g["set_aside_cents"]) == ("Vacation", "saving", 0)
+    assert (g["per_payday_cents"], g["next_payday"], g["paydays_left"]) == (20000, "2026-11-06", 5)

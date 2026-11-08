@@ -101,7 +101,9 @@ def demo_plan():
                       {"name": "City Power", "amount": 70, "due_day": 18, "fixed": False}],
             "monthly_spend": {"FOOD_AND_DRINK": 700, "GENERAL_MERCHANDISE": 250},
             "buffer": 200,
-            "goals": [{"name": "Emergency fund", "target": 15000, "by": f"{TODAY.year + 1}-06-30"}]}
+            "goals": [{"name": "Vacation", "target": 1000, "start": (TODAY - timedelta(days=30)).isoformat(),
+                       "by": (TODAY + timedelta(days=60)).isoformat()},
+                      {"name": "Emergency fund", "target": 15000}]}  # no date: shows how to start one
 
 
 def demo_manual():
@@ -132,7 +134,7 @@ if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8790
     fake = bank()
     feed = price_feed()
-    plan.save(demo_plan())
+    plan.save(demo_plan(), TODAY)
     manual.save(demo_manual())
     with contextlib.closing(db.connect()) as conn:
         print([r["status"] for r in sync.sync_all(conn, lambda env: fake)], flush=True)

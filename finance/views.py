@@ -78,6 +78,7 @@ def today(ctx):
     return {
         "date": ctx["today"].isoformat(),
         "safe_to_spend": money.safe_to_spend(ctx["accounts"], ctx["plan"], ctx["txns"], ctx["today"]),
+        "goals": [money.goal_progress(g, income, ctx["today"]) for g in ctx["plan"]["goals"]],
         "alerts": attention["alerts"],
         "alerts_dismissed": attention["dismissed_count"],
         "spent_today_cents": spent[0]["total_cents"],
@@ -152,7 +153,7 @@ def holdings(ctx):
         "holdings": [{**h, "bucket": money.bucket_of(h)} for h in ctx["holdings"]],
         "allocation": money.allocation(ctx["holdings"]),
         "left_to_invest": money.left_to_invest(ctx["accounts"], ctx["holdings"], ctx["plan"], ctx["upcoming"],
-                                               ctx["typical_monthly_cents"]),
+                                               ctx["typical_monthly_cents"], ctx["today"]),
         "history": money.portfolio_history(ctx["holdings"], ctx["prices"],
                                            ctx["today"] - timedelta(days=prices.HISTORY_DAYS), ctx["today"]),
         "contributions_per_year_cents": money.yearly_contributions(ctx["manual"], ctx["plan"].get("income")),
@@ -257,24 +258,37 @@ def _screen_lines(ctx, screen):
                 f"runway {r['months']} months"]
     if screen == "investing":
         li = money.left_to_invest(ctx["accounts"], ctx["holdings"], ctx["plan"], ctx["upcoming"],
-                                  ctx["typical_monthly_cents"])
+                                  ctx["typical_monthly_cents"], ctx["today"])
         return ["Left to invest:"] + [f"  {line['label']}: {_d(line['amount_cents'])}" for line in li["lines"]] + \
             [f"  Option: {o['label']}: {_d(o['amount_cents'])}" for o in li["options"]]
     return []
 
 
-def _plan_lines(plan):
+def _plan_lines(plan, today):
     inc = plan.get("income")
     out = [f"- Income: {_d(money.to_cents(inc['amount']))} {inc['schedule']}, next payday {inc['next_payday']}"
            if inc else "- Income: not set"]
     out.append("- Bills: " + ("; ".join(f"{b['name']} {_d(money.to_cents(b['amount']))} on day {b['due_day']}"
                                         for b in plan.get("bills") or []) or "none listed"))
-    out.append(f"- Buffer: {_d(money.to_cents(plan['buffer'])) if plan.get('buffer') is not None else 'not set'}")
+    buf = money.buffer_months(plan)
+    line = f"- Buffer: {_d(buf['buffer_cents']) if plan.get('buffer') is not None else 'not set'}"
+    if plan.get("buffer") is not None and buf["months"] is not None:
+        line += (f", {buf['months']} months of planned costs ({_d(buf['monthly_cents'])} a month: "
+                 f"bills {_d(buf['bills_cents'])} + spending targets {_d(buf['targets_cents'])})")
+    out.append(line)
     if plan.get("monthly_spend"):
         out.append("- Monthly spend targets: " + ", ".join(f"{k} {_d(money.to_cents(v))}"
                                                            for k, v in plan["monthly_spend"].items()))
     for g in plan.get("goals") or []:
-        out.append(f"- Goal: {g['name']} {_d(money.to_cents(g['target']))}" + (f" by {g['by']}" if g.get("by") else ""))
+        p = money.goal_progress(g, inc, today)
+        line = f"- Goal: {g['name']} {_d(p['target_cents'])}" + (f" by {g['by']}" if g.get("by") else "")
+        if p["status"] == "saving":
+            line += f", {_d(p['set_aside_cents'])} set aside in checking so far"
+            if p["per_payday_cents"]:
+                line += f", {_d(p['per_payday_cents'])} each payday, {p['paydays_left']} paydays left"
+        elif p["status"] == "ready":
+            line += ", date reached: its money is free to spend"
+        out.append(line)
     return out
 
 
@@ -316,7 +330,7 @@ def snapshot(ctx, screen=None):
         *[f"- {h.get('ticker') or h.get('name')}: {_d(h['value_cents'])}" for h in ctx["holdings"][:12]],
         "",
         "Plan",
-        *_plan_lines(ctx["plan"]),
+        *_plan_lines(ctx["plan"], ctx["today"]),
     ]
     attention = alerts(ctx)
     if attention["alerts"] or attention["dismissed_count"]:

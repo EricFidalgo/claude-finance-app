@@ -188,7 +188,7 @@ async def put_plan(request: Request):
     except ValueError:
         return JSONResponse({"errors": ["body must be JSON"]}, status_code=400)
     try:
-        return JSONResponse(plan.save(body))
+        return JSONResponse(plan.save(body, request.app.state.clock().astimezone().date()))
     except plan.PlanError as e:
         return JSONResponse({"errors": e.errors}, status_code=400)
 

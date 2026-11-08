@@ -34,7 +34,8 @@ def manual_path() -> Path:
 
 def lock_path() -> Path:
     """The app lock's password hash and passkeys (see lock.py)."""
-    return data_dir() / "lock.json"
+    shared = os.environ.get("FINANCE_LOCK_FILE")  # the one password file shared with the Docker panel and VoiceStudio
+    return Path(shared) if shared else data_dir() / "lock.json"
 
 
 def allowed_hosts() -> list:

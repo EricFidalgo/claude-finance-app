@@ -7,7 +7,7 @@ import math
 import os
 from datetime import date
 
-from . import config
+from . import config, money
 
 EMPTY_PLAN = {"version": 1, "income": None, "bills": [], "monthly_spend": {}, "buffer": None, "goals": []}
 SCHEDULES = ("weekly", "biweekly", "semimonthly", "monthly")
@@ -103,16 +103,37 @@ def validate(p) -> list:
             errors.append(f"goals[{i}] needs a name and a target amount")
         elif g.get("by") is not None and not _is_date(g["by"]):
             errors.append(f"goals[{i}].by must be a date like 2027-06-30")
+        elif g.get("start") is not None and not _is_date(g["start"]):
+            errors.append(f"goals[{i}].start must be a date like 2026-11-08")
+        elif g.get("saved") is not None and not _is_amount(g["saved"]):
+            errors.append(f"goals[{i}].saved must be a number of dollars, 0 or more")
     return errors
 
 
-def save(p: dict) -> dict:
+def save(p: dict, today: date) -> dict:
+    """Validate and write the plan, starting or restarting each goal's saving clock (see _started)."""
     errors = validate(p)
     if errors:
         raise PlanError(errors)
     p = normalize(p)
+    before = load()
+    p["goals"] = [_started(g, before, today) for g in p["goals"]]
     _write(p)
     return p
+
+
+def _started(goal, before, today):
+    """A dated goal without a start starts saving today; an undated one waits. A goal whose target or date changed
+    keeps what it had set aside by today as `saved` and starts again from today, so only the rest is re-spread."""
+    if not goal.get("by"):
+        return {k: v for k, v in goal.items() if k not in ("start", "saved")}
+    if not goal.get("start"):
+        return {**goal, "start": today.isoformat()}
+    old = next((g for g in before["goals"] if g.get("name") == goal["name"] and g.get("start") == goal["start"]), None)
+    if old is None or (old.get("target"), old.get("by")) == (goal["target"], goal["by"]):
+        return goal
+    kept = money.goal_progress(old, before.get("income"), today)["set_aside_cents"]
+    return {**goal, "start": today.isoformat(), "saved": kept / 100}
 
 
 def _write(p):

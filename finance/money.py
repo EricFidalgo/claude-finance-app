@@ -277,6 +277,16 @@ def to_cents(dollars):
     return int((Decimal(str(dollars)) * 100).quantize(Decimal(1), ROUND_HALF_UP))
 
 
+def buffer_months(plan):
+    """How many months of planned costs (bills plus spending targets) the buffer covers; None with no costs planned."""
+    buffer = to_cents(plan.get("buffer") or 0)
+    bills = sum(to_cents(b.get("amount") or 0) for b in plan.get("bills") or [])
+    targets = sum(to_cents(v or 0) for v in (plan.get("monthly_spend") or {}).values())
+    monthly = bills + targets
+    return {"buffer_cents": buffer, "bills_cents": bills, "targets_cents": targets, "monthly_cents": monthly,
+            "months": round(buffer / monthly, 1) if monthly else None}
+
+
 def _name_key(s):
     return (s or "").lower().split()[0] if (s or "").split() else ""
 
@@ -298,19 +308,79 @@ def bill_paid(bill, due, txns):
     return any(lo <= x["date"] <= hi and pays_bill(bill, x) for x in txns)
 
 
+PAYCHECK_LOOKBACK_DAYS = 3  # a deposit can post a day or two ahead of payday
+
+
+def expected_income_cents(income, txns, today):
+    """The paycheck due today that hasn't shown up in the synced transactions yet, else 0.
+
+    On payday the plan's next payday is already two weeks out, so without this a paycheck that is still syncing
+    would leave the pool short. Any income, or an inflow at least half a paycheck, since a few days before payday
+    counts as the paycheck having landed, so it is never added on top of a checking balance that holds it.
+    """
+    if previous_payday(income, today) != today:
+        return 0
+    pay = to_cents(income["amount"])
+    since = _iso(today - timedelta(days=PAYCHECK_LOOKBACK_DAYS))
+    landed = any(x["date"] >= since and x["amount_cents"] < 0 and
+                 (x.get("category") == "INCOME" or -x["amount_cents"] * 2 >= pay) for x in txns)
+    return 0 if landed else pay
+
+
+def goal_progress(goal, income, today):
+    """Where a savings goal stands. Its money stays in checking: `saved` dollars were already set aside on `start`,
+    and each payday after `start`, up to (not on) `by`, sets aside an equal slice of the rest. Safe-to-spend keeps
+    the set-aside part out of reach. On `by` it is freed to spend, so it shows as saved but holds nothing back.
+    """
+    target, base = to_cents(goal["target"]), to_cents(goal.get("saved") or 0)
+    out = {"name": goal["name"], "target_cents": target, "by": goal.get("by"),
+           "set_aside_cents": 0, "saved_cents": 0, "per_payday_cents": None, "paydays_left": None, "next_payday": None}
+    if not goal.get("by") or not goal.get("start"):
+        return {**out, "status": "no_date"}
+    if not income:
+        return {**out, "status": "needs_pay_schedule"}
+    by = date.fromisoformat(goal["by"])
+    if today >= by:
+        return {**out, "status": "ready", "saved_cents": target}
+    paydays, d = [], date.fromisoformat(goal["start"])
+    income = _anchored_by(income, d)  # the plan's anchor payday may be after the goal started
+    while (d := next_payday(income, d)) < by:
+        paydays.append(d)
+    done = sum(d <= today for d in paydays)
+    left, rest = paydays[done:], max(0, target - base)
+    # with no payday before the date, the whole target is set aside now
+    set_aside = base + round(rest * done / len(paydays)) if paydays else target
+    return {**out, "status": "saving", "set_aside_cents": set_aside, "saved_cents": set_aside,
+            "per_payday_cents": round(rest / len(paydays)) if paydays else None,
+            "paydays_left": len(left), "next_payday": _iso(left[0]) if left else None}
+
+
+def goals_set_aside_cents(plan, today):
+    return sum(goal_progress(g, plan.get("income"), today)["set_aside_cents"] for g in plan.get("goals") or [])
+
+
+def _goals_line(goals_cents):
+    return [{"label": "Saving for goals", "amount_cents": -goals_cents}] if goals_cents else []
+
+
 def safe_to_spend(accounts, plan, txns, today):
     """Daily amount that leaves bills due before payday, card balances and the buffer covered."""
     missing = [label for label, ok in (("pay schedule", plan.get("income")), ("bills", plan.get("bills"))) if not ok]
     if missing:
         return {"status": "needs_plan", "missing": missing}
     payday = next_payday(plan["income"], today)
-    due = sorted(((d, b) for b in plan["bills"] for d in bill_dates(b, today, payday)
+    # A bill that came due a few days ago and hasn't been paid yet still counts, at its plan amount (the estimate
+    # for a variable bill) until the payment posts: bill_paid looks that far after the due date too.
+    due = sorted(((d, b) for b in plan["bills"]
+                  for d in bill_dates(b, today - timedelta(days=PAID_LATE_DAYS), payday)
                   if not bill_paid(b, d, txns)), key=lambda db: db[0])
     checking = checking_cents(accounts)
     bills = sum(to_cents(b["amount"]) for _, b in due)
     cards = cards_owed_cents(accounts)
     buffer = to_cents(plan.get("buffer") or 0)
-    available = checking - bills - cards - buffer
+    expected_income = expected_income_cents(plan["income"], txns, today)
+    goals_cents = goals_set_aside_cents(plan, today)
+    available = checking + expected_income - bills - cards - buffer - goals_cents
     days = (payday - today).days
     # Today's allowance is what the day started with, so it holds still while you spend. A plan bill paid today
     # is a bill, not spending, so it neither counts as spent nor comes back. Only a bill due inside bill_paid's window
@@ -326,6 +396,7 @@ def safe_to_spend(accounts, plan, txns, today):
         "payday": _iso(payday),
         "days": days,
         "bills": [{"name": b["name"], "due": _iso(d), "amount_cents": to_cents(b["amount"])} for d, b in due],
+        "expected_income_cents": expected_income,
         "available_cents": available,
         "per_day_cents": round(available / days),
         "spent_today_cents": spent,
@@ -333,9 +404,12 @@ def safe_to_spend(accounts, plan, txns, today):
         "allowance_cents": allowance,
         "left_today_cents": allowance - spent,
         "lines": [{"label": "Checking (available)", "amount_cents": checking},
+                  *([{"label": "Payday income (not synced yet)", "amount_cents": expected_income}]
+                    if expected_income else []),
                   {"label": "Bills before payday", "amount_cents": -bills},
                   {"label": "Credit card owed", "amount_cents": -cards},
-                  {"label": "Buffer", "amount_cents": -buffer}],
+                  {"label": "Buffer", "amount_cents": -buffer},
+                  *_goals_line(goals_cents)],
     }
 
 
@@ -774,8 +848,8 @@ def tips(accounts, holdings, plan, txns, recurring, typical_monthly_cents, today
 RESERVE_MONTHS = (0, 1, 3)
 
 
-def left_to_invest(accounts, holdings, plan, upcoming, typical_monthly_cents):
-    """Idle brokerage cash plus whatever checking holds beyond card balances, upcoming bills and the buffer.
+def left_to_invest(accounts, holdings, plan, upcoming, typical_monthly_cents, today):
+    """Idle brokerage cash plus whatever checking holds beyond card balances, upcoming bills, the buffer and goal savings.
 
     Options show how much remains if some months of typical spending stay in cash. The owner decides.
     """
@@ -783,7 +857,8 @@ def left_to_invest(accounts, holdings, plan, upcoming, typical_monthly_cents):
     bills = sum(b["amount_cents"] for b in upcoming["bills"] if b.get("account_key") in checking and not b["paid"])
     cards = cards_owed_cents(accounts)
     buffer = to_cents(plan.get("buffer") or 0)
-    checking_left = max(0, checking_cents(accounts) - cards - bills - buffer)
+    goals_cents = goals_set_aside_cents(plan, today)
+    checking_left = max(0, checking_cents(accounts) - cards - bills - buffer - goals_cents)
     idle = sum(x.get("value_cents") or 0 for x in holdings if bucket_of(x) == "cash")
     total = idle + checking_left
     months = RESERVE_MONTHS if typical_monthly_cents else (0,)
@@ -795,6 +870,7 @@ def left_to_invest(accounts, holdings, plan, upcoming, typical_monthly_cents):
                   {"label": "Credit card owed", "amount_cents": -cards},
                   {"label": "Upcoming bills from checking", "amount_cents": -bills},
                   {"label": "Buffer", "amount_cents": -buffer},
+                  *_goals_line(goals_cents),
                   {"label": "Idle cash in brokerage", "amount_cents": idle}],
         "options": [{"months": m, "amount_cents": max(0, total - m * (typical_monthly_cents or 0)),
                      "label": "Invest it all" if m == 0 else

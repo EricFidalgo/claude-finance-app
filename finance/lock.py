@@ -211,7 +211,7 @@ class Lock:
         rp_id = urlparse(origin).hostname or ""
         with self._mutex:
             doc = self._load()
-            mine = [{"type": "public-key", "id": p["id"]} for p in doc.get("passkeys", []) if p["origin"] == origin]
+            mine = [{"type": "public-key", "id": p["id"]} for p in doc.get("passkeys", []) if urlparse(p["origin"]).hostname == rp_id]  # same host, any port: one passkey serves every app
             if kind == "register":
                 if not self._valid(self._token(headers), doc):
                     raise Refused("Unlock with the password first.")
@@ -289,7 +289,7 @@ class Lock:
         try:
             with self._mutex:
                 doc = self._load()
-                p = next((p for p in doc.get("passkeys", []) if p["id"] == cred.get("id") and p["origin"] == origin), None)
+                p = next((p for p in doc.get("passkeys", []) if p["id"] == cred.get("id") and urlparse(p["origin"]).hostname == urlparse(origin).hostname), None)
                 raw = self._client_data(cred, "login", origin)
                 if not p:
                     raise Refused("Face ID check failed.")

@@ -294,13 +294,35 @@ async function screenToday() {
       : h('ul', { class: 'rows' }, d.next_bills.map(billRow)),
     h('p', {}, h('a', { href: '#bills' }, 'Calendar and all bills')));
 
-  const out = [hero, spentCard(d.spent), attentionCard(d.alerts, d.alerts_dismissed), recentCard(d.recent, d.spent.at(-1), d.date),
+  const out = [hero, spentCard(d.spent), goalsCard(d.goals), attentionCard(d.alerts, d.alerts_dismissed), recentCard(d.recent, d.spent.at(-1), d.date),
     next].filter(Boolean);
   if (d.tips.length) {
     out.push(card('Tips', d.tips.slice(0, 3).map((t) => h('div', { class: 'alert st-info' }, icon('info'),
       h('div', {}, h('div', { class: 'alert-title' }, t.title), h('div', { class: 'alert-detail' }, t.detail))))));
   }
   return out;
+}
+
+// Savings goals: money kept in checking, a slice set aside each payday. Safe-to-spend already leaves it alone.
+function goalsCard(goals) {
+  if (!goals.length) return null;
+  const note = (g) => {
+    if (g.status === 'ready') return `${fmtShort(g.by)} is here, so the ${money0(g.target_cents)} is back in your daily spending. Remove the goal from the plan when you're done.`;
+    if (g.status === 'no_date') return 'Add a date in the plan to start setting money aside.';
+    if (g.status === 'needs_pay_schedule') return 'Add your pay schedule to the plan to start setting money aside.';
+    if (!g.next_payday) return `All set aside. Free to spend on ${fmtShort(g.by)}.`;
+    return `${money(g.per_payday_cents)} each payday, next on ${fmtShort(g.next_payday)} · need it by ${fmtShort(g.by)}`;
+  };
+  return card('Saving for', h('ul', { class: 'rows' }, goals.map((g) => {
+    const saved = g.saved_cents;
+    const fill = h('div', { class: 'gauge-fill' });
+    fill.style.width = `${g.target_cents ? Math.min(100, (100 * saved) / g.target_cents) : 0}%`;
+    return h('li', { class: 'goal' },
+      h('div', { class: 'gauge-legend goal-head' }, h('b', {}, g.name), h('span', {}, `${money0(saved)} of ${money0(g.target_cents)}`)),
+      h('div', { class: 'gauge', role: 'img', 'aria-label': `${money0(saved)} of ${money0(g.target_cents)} set aside` }, fill),
+      h('p', { class: 'sub' }, note(g)));
+  })),
+  h('p', { class: 'sub' }, "Kept in checking and left out of what's safe to spend."));
 }
 
 // Today, this week and the pay period so far (this month without a pay schedule). Each opens its transactions.
@@ -1199,6 +1221,13 @@ const readNum = (input) => {
   return v === '' ? null : Number(v);
 };
 
+const cents = (dollars) => Math.round((dollars || 0) * 100);
+function ord(n) {
+  const t = n % 100 >= 11 && n % 100 <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th');
+  return `${n}${t}`;
+}
+const BUFFER_MONTHS = [1, 2, 3, 6];
+
 async function screenPlan() {
   const [plan, status] = await Promise.all([api('/api/plan'), api('/api/status')]);
   setSynced(status.last_synced_at);
@@ -1231,6 +1260,13 @@ async function screenPlan() {
         h('label', { class: 'check' }, el.varies, 'Amount changes month to month')],
       read: () => ({ ...b, name: el.name.value.trim(), amount: readNum(el.amount), due_day: readNum(el.due),
         autopay: el.autopay.checked, fixed: !el.varies.checked }),
+      summary: () => {
+        const due = readNum(el.due);
+        return { title: el.name.value.trim() || 'New bill',
+          sub: [Number.isInteger(due) && due >= 1 && due <= 31 ? `due ${ord(due)}` : 'no due day',
+            el.autopay.checked && 'autopay', el.varies.checked && 'varies'].filter(Boolean).join(' · '),
+          amount: readNum(el.amount) == null ? '' : (el.varies.checked ? '~' : '') + money(cents(readNum(el.amount))) };
+      },
     };
   });
 
@@ -1239,24 +1275,50 @@ async function screenPlan() {
       cat: h('select', { name: 'target-category' }, CATEGORIES.map((c) => h('option', { value: c, selected: c === cat }, categoryLabel(c)))),
       amount: num(amount, { name: 'target-amount', placeholder: '0' }),
     };
-    return { node: h('div', { class: 'field-row' }, field('Category', el.cat), field('Per month ($)', el.amount)),
+    return { node: [field('Category', el.cat), field('Per month ($)', el.amount)],
       read: () => [el.cat.value, readNum(el.amount)] };
   });
 
   const goals = repeater(plan.goals, 'Add goal', (g = {}) => {
     const el = {
-      name: h('input', { type: 'text', name: 'goal-name', value: g.name || '', autocomplete: 'off', placeholder: 'Emergency fund…' }),
+      name: h('input', { type: 'text', name: 'goal-name', value: g.name || '', autocomplete: 'off', placeholder: 'Vacation…' }),
       target: num(g.target, { name: 'goal-target', placeholder: '0' }),
       by: h('input', { type: 'date', name: 'goal-by', value: g.by || '' }),
     };
-    return { node: [field('Name', el.name), h('div', { class: 'field-row' }, field('Target ($)', el.target), field('By (optional)', el.by))],
-      read: () => ({ ...g, name: el.name.value.trim(), target: readNum(el.target), by: el.by.value || null }) };
+    return { node: [field('Name', el.name), h('div', { class: 'field-row' }, field('Target ($)', el.target), field('Need it by', el.by))],
+      read: () => ({ ...g, name: el.name.value.trim(), target: readNum(el.target), by: el.by.value || null }),
+      summary: () => ({ title: el.name.value.trim() || 'New goal',
+        sub: el.by.value ? `by ${YEAR_FMT.format(parseDay(el.by.value))}` : 'no date yet',
+        amount: readNum(el.target) == null ? '' : money0(cents(readNum(el.target))) }) };
   });
+
+  // Each folded section's header keeps a live count and total, so a closed section still says what's in it.
+  const billsNote = h('span', {}), targetsNote = h('span', {}), goalsNote = h('span', {});
+  const sumOf = (xs) => xs.reduce((a, x) => a + cents(Number.isFinite(x) ? x : 0), 0);
+  const buffer = bufferPanel(f.buffer);
+  function refresh() {
+    const b = bills.read(), t = targets.read(), g = goals.read();
+    const billsC = sumOf(b.map((x) => x.amount)), targetsC = sumOf(t.map(([, v]) => v));
+    billsNote.textContent = b.length ? `${plural(b.length, 'bill')} · ${money0(billsC)}/mo` : 'None yet';
+    targetsNote.textContent = t.length ? `${t.length} · ${money0(targetsC)}/mo` : 'None yet';
+    goalsNote.textContent = g.length ? `${plural(g.length, 'goal')} · ${money0(sumOf(g.map((x) => x.target)))}` : 'None yet';
+    buffer.update(billsC, targetsC);
+  }
+
+  const sections = {
+    bills: planFold('plan-bills', 'Bills', billsNote,
+      h('p', { class: 'sub' }, 'Fixed bills you pay each month. Tap one to change it. The Bills tab also finds recurring charges you can add.'), bills.node),
+    monthly_spend: planFold('plan-targets', 'Monthly spending targets', targetsNote,
+      h('p', { class: 'sub' }, 'What you mean to spend per category each month. Shown as marks on Spending.'), targets.node),
+    goals: planFold('plan-goals', 'Goals', goalsNote,
+      h('p', { class: 'sub' }, 'Money to build up in checking. Each payday sets aside an equal slice, and safe-to-spend leaves it alone. On the date, it is yours to spend.'), goals.node),
+  };
+  const lists = { bills, goals };
 
   const errors = h('div', { role: 'alert' });
   const save = h('button', { class: 'btn primary', type: 'submit' }, 'Save plan');
   state.planDirty = false;
-  const form = h('form', { novalidate: true, oninput: () => { state.planDirty = true; }, onchange: () => { state.planDirty = true; }, onsubmit: async (e) => {
+  const form = h('form', { novalidate: true, oninput: () => { state.planDirty = true; refresh(); }, onchange: () => { state.planDirty = true; refresh(); }, onsubmit: async (e) => {
     e.preventDefault();
     const amount = readNum(f.amount);
     const next = {
@@ -1279,6 +1341,13 @@ async function screenPlan() {
       toast('Plan saved.');
     } catch (err) {
       const list = err.body?.errors || [err.message];
+      // Open whatever a problem points at (bills[2].due_day opens Bills and its third bill), so it can be fixed.
+      for (const msg of list) {
+        const m = /^(bills|monthly_spend|goals)(?:\[(\d+)\])?/.exec(msg);
+        if (!m) continue;
+        sections[m[1]].open();
+        if (m[2] != null) lists[m[1]]?.open(+m[2]);
+      }
       errors.replaceChildren(h('div', { class: 'errors' }, h('b', {}, 'Not saved. Fix these:'), h('ul', {}, list.map((x) => h('li', {}, x)))));
       errors.scrollIntoView({ behavior: 'smooth', block: 'center' });
     } finally {
@@ -1290,31 +1359,94 @@ async function screenPlan() {
   card('Income', h('p', { class: 'sub' }, 'Your take-home pay. Safe-to-spend counts down to the next payday.'),
     h('div', { class: 'field-row' }, field('Each paycheck ($)', f.amount), field('Paid', f.schedule)),
     field('Next payday', f.payday), days),
-  card('Bills', h('p', { class: 'sub' }, 'Fixed bills you pay each month. Bills tab also finds recurring charges you can add.'), bills.node),
-  card('Buffer', field('Keep this much in checking ($)', f.buffer)),
-  card('Monthly spending targets', targets.node),
-  card('Goals', goals.node),
+  sections.bills.node,
+  sections.monthly_spend.node,
+  buffer.node,
+  sections.goals.node,
   h('div', { class: 'save-bar' }, save));
+  refresh();
   return [form];
+}
+
+// A Plan section that folds to one row: its title and a live summary. Stays as you left it, like foldCard.
+function planFold(key, title, note, ...kids) {
+  const details = h('details', { open: !!state.folds[key], ontoggle: (e) => { state.folds[key] = e.currentTarget.open; } },
+    h('summary', {}, h('h2', {}, title), h('span', { class: 'fold-note' }, note, icon('chevron'))),
+    h('div', { class: 'fold-body' }, kids));
+  return { node: h('section', { class: 'card fold' }, details), open: () => { details.open = true; } };
+}
+
+// The buffer, in dollars and in months of planned costs (bills plus spending targets), the same way
+// money.buffer_months works it out. A month chip sets the buffer to that many months.
+function bufferPanel(input) {
+  let monthly = 0;
+  const total = h('span', { class: 'tile-amt' }), months = h('span', { class: 'tile-amt' }), perMonth = h('span', { class: 'tile-amt' });
+  const tile = (label, amt, sub) => h('div', { class: 'tile' }, h('span', { class: 'tile-label' }, label), amt,
+    sub && h('span', { class: 'tile-sub' }, sub));
+  const monthsSub = h('span', {}), costNote = h('p', { class: 'sub' });
+  const chips = h('div', { class: 'chips buffer-chips', role: 'group', 'aria-label': 'Set the buffer to months of costs' },
+    BUFFER_MONTHS.map((n) => h('button', { class: 'chip', type: 'button', 'data-months': n, onclick: () => {
+      input.value = String(Math.round(monthly * n) / 100);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    } }, n === 1 ? '1 month' : `${n} mo`)));
+  const chipRow = h('div', {}, h('p', { class: 'field-label' }, 'Set to months of costs'), chips);
+  function update(billsC, targetsC) {
+    monthly = billsC + targetsC;
+    const buf = cents(Math.max(readNum(input) || 0, 0));
+    total.textContent = money0(buf);
+    perMonth.textContent = monthly ? money0(monthly) : '—';
+    months.textContent = monthly ? (buf / monthly).toFixed(1) : '—';
+    monthsSub.textContent = monthly ? (Math.round(buf / monthly * 10) === 10 ? 'month' : 'months') : 'add bills first';
+    costNote.textContent = monthly
+      ? `A month of costs is your bills (${money0(billsC)}) plus your spending targets (${money0(targetsC)}).` +
+        (targetsC ? '' : ' With no spending targets, it leaves out groceries, gas and the rest, so add targets for a truer number.')
+      : 'Add bills or spending targets to see how many months this covers.';
+    chipRow.hidden = !monthly;
+    for (const b of chips.children) b.setAttribute('aria-pressed', String(monthly > 0 && buf === monthly * +b.dataset.months));
+  }
+  const node = card('Buffer',
+    h('p', { class: 'sub' }, 'Kept in checking and never touched. Safe-to-spend and “ready to invest” leave it out.'),
+    h('div', { class: 'tiles' }, tile('Buffer', total), tile('Covers', months, monthsSub), tile('Per month', perMonth, 'bills + targets')),
+    costNote,
+    chipRow,
+    field('Buffer amount ($)', input));
+  return { node, update };
 }
 
 function repeater(items, addLabel, make) {
   const entries = [];
   const list = h('div', {});
-  function add(item) {
+  function add(item, open = false) {
     const entry = make(item);
-    const box = h('div', { class: 'repeat' },
-      h('div', { class: 'repeat-head' }, h('span', {}),
-        h('button', { class: 'link-btn', type: 'button', onclick: () => { entries.splice(entries.indexOf(entry), 1); box.remove(); list.dispatchEvent(new Event('input', { bubbles: true })); } }, 'Remove')),
-      entry.node);
+    const remove = h('button', { class: 'link-btn', type: 'button', onclick: () => {
+      entries.splice(entries.indexOf(entry), 1); box.remove(); list.dispatchEvent(new Event('input', { bubbles: true }));
+    } }, 'Remove');
+    let box;
+    if (entry.summary) {
+      // A row that opens to its fields; the row's text follows the fields as you type.
+      const title = h('span', { class: 'repeat-title' }), sub = h('span', { class: 'repeat-sub' }), amt = h('span', { class: 'repeat-amt' });
+      const draw = () => { const x = entry.summary(); title.textContent = x.title; sub.textContent = x.sub; amt.textContent = x.amount; };
+      entry.details = h('details', { open },
+        h('summary', {}, h('span', { class: 'repeat-main' }, title, sub), amt, icon('chevron')),
+        h('div', { class: 'repeat-body' }, entry.node, h('div', { class: 'repeat-foot' }, remove)));
+      box = h('div', { class: 'repeat fold-item', oninput: draw, onchange: draw }, entry.details);
+      draw();
+    } else {
+      // A one-line entry (a spending target): its fields side by side, then a small remove button.
+      remove.className = 'icon-btn repeat-x';
+      remove.setAttribute('aria-label', 'Remove');
+      remove.replaceChildren(icon('close'));
+      box = h('div', { class: 'repeat-line' }, entry.node, remove);
+    }
     entries.push(entry);
     list.append(box);
     return box;
   }
-  (items || []).forEach(add);
+  (items || []).forEach((x) => add(x));
   const addBtn = h('button', { class: 'btn small', type: 'button',
-    onclick: () => { add().querySelector('input, select')?.focus(); list.dispatchEvent(new Event('input', { bubbles: true })); } }, addLabel);
-  return { node: [list, addBtn], read: () => entries.map((e) => e.read()) };
+    onclick: () => { add(undefined, true).querySelector('input, select')?.focus(); list.dispatchEvent(new Event('input', { bubbles: true })); } }, addLabel);
+  return { node: [list, addBtn], read: () => entries.map((e) => e.read()),
+    open: (i) => { if (entries[i]?.details) entries[i].details.open = true; } };
 }
 
 // --- shell: routing, sync, Ask Claude

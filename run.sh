@@ -78,7 +78,7 @@ case "${1:-up}" in
   logs) docker compose logs -f ;;
   password)
     running || up
-    docker compose exec -it app python -m finance.lock /app/data/lock.json
+    docker compose exec -it app python -m finance.lock /app/lock/lock.json
     ;;
   *) sed -n '2,8p' "$0"; exit 1 ;;
 esac

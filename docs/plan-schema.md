@@ -21,7 +21,7 @@ Amounts are **dollars** (`1650` or `15.49`), not cents. Dates are `YYYY-MM-DD`.
   ],
   "monthly_spend": {"FOOD_AND_DRINK": 700, "GENERAL_MERCHANDISE": 250},
   "buffer": 200,
-  "goals": [{"name": "Emergency fund", "target": 15000, "by": "2027-06-30"}]
+  "goals": [{"name": "Vacation", "target": 1000, "start": "2026-11-08", "by": "2027-01-15"}]
 }
 ```
 
@@ -44,7 +44,12 @@ Amounts are **dollars** (`1650` or `15.49`), not cents. Dates are `YYYY-MM-DD`.
 | `bills[].account` | text or `null` | Optional: account mask it's paid from. Informational. |
 | `bills[].category` | text or `null` | Optional: Plaid category, e.g. `RENT_AND_UTILITIES`. |
 | `monthly_spend` | `{category: dollars}` | Monthly spending targets per Plaid primary category (`FOOD_AND_DRINK`, `GENERAL_MERCHANDISE`, `TRANSPORTATION`, `ENTERTAINMENT`, …). Shown as target marks on Spending. |
-| `buffer` | dollars ≥ 0 or `null` | Kept untouched in checking; subtracted from safe-to-spend and from "ready to invest". |
-| `goals` | list | Optional. Each needs `name` and `target` (dollars); `by` is an optional date. |
+| `buffer` | dollars ≥ 0 or `null` | Kept untouched in checking; subtracted from safe-to-spend and from "ready to invest". The Plan screen and the snapshot also show it as months of planned costs (all bills plus all spending targets). |
+| `goals` | list | Optional. Money built up inside checking. Each needs `name` and `target` (dollars). |
+| `goals[].by` | date, optional | When you need the money. Without it the goal sets nothing aside. On this date the money is freed back into safe-to-spend. |
+| `goals[].start` | date, optional | When saving began. Filled in by the app; leave it alone. |
+| `goals[].saved` | dollars ≥ 0, optional | Already set aside on `start`. Filled in by the app when you change a goal. |
+
+Each goal sets aside an equal slice of what's left (`target` − `saved`) on every payday after `start`, up to (not on) `by`. What it has set aside so far is subtracted from safe-to-spend and from "ready to invest", like the buffer. Saving a goal whose `target` or `by` changed keeps what it had set aside by today as `saved` and moves `start` to today, so only the rest is spread over the paydays left. A goal is matched to its earlier version by `name` and `start`.
 
 A save that fails validation is rejected whole, with one message per problem (for example `bills[0].due_day must be a day of the month, 1-31`), and the file is left as it was.

@@ -14,6 +14,8 @@ services:
     # The owner's data, kept outside the repo (run.sh creates the folder and moves an old ./data there).
     volumes:
       - ${FINANCE_DATA:-${HOME}/.local/share/finance-tracker}:/app/data
+      # The phone password and Face ID, shared with the Docker panel and VoiceStudio. A folder, not a file: the lock replaces the file on save.
+      - ${HOME}/.local/share/app-lock:/app/lock
     # Values pass through by name from the shell that runs compose (run.sh exports them).
     environment:
       - PLAID_CLIENT_ID
@@ -21,4 +23,5 @@ services:
       - PLAID_SANDBOX_SECRET
       - FINANCE_PLAID_ENV
       - FINANCE_DATA_DIR=/app/data
+      - FINANCE_LOCK_FILE=/app/lock/lock.json
       - TZ=${TZ:-America/New_York}

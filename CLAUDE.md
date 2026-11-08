@@ -23,8 +23,8 @@ To change the plan, `PUT /api/plan` with the whole plan (schema: `docs/plan-sche
 - **Plaid's sign:** positive is money out, negative is money in. Amounts are integer cents everywhere except per-share prices and the dollars in `plan.json` and `manual.json`.
 - **Spending** excludes income, transfers between own accounts and credit-card payments; refunds net in; pending counts.
 - **Accounts dedupe** on `family:mask` (`bofa:2222`): Merrill and BoA both report CMA-Edge, and it counts once.
-- **Safe-to-spend** = (checking available − unpaid plan bills due before next payday − card owed incl. pending − buffer) ÷ days to payday. It stays `needs_plan` until income and bills exist.
-- **Left to spend today** = allowance − spent today, where allowance = (safe-to-spend pool + spent today) ÷ days to payday, so it holds still through the day. Spent today leaves out plan-bill payments. Rent, plan bills, card owed and buffer are already out; the allowance covers everything else.
+- **Safe-to-spend** = (checking available + paycheck still syncing − unpaid plan bills due before next payday − card owed incl. pending − buffer − goal savings so far) ÷ days to payday. A goal sets aside an equal slice of its target each payday until its `by` date, when the money is freed. It stays `needs_plan` until income and bills exist. An unpaid bill stays in for 5 days after its due date at the plan amount (the estimate for a variable bill like Flint Energies), until a matching payment posts. On payday itself the plan's paycheck counts as coming until an income or paycheck-sized inflow shows up in the last 3 days.
+- **Left to spend today** = allowance − spent today, where allowance = (safe-to-spend pool + spent today) ÷ days to payday, so it holds still through the day. Spent today leaves out plan-bill payments. Rent, plan bills, card owed, buffer and goal savings are already out; the allowance covers everything else.
 
 ## Working on the code
 

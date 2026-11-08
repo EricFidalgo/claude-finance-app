@@ -203,6 +203,54 @@ def test_safe_to_spend_skips_a_bill_already_paid_this_cycle_and_can_go_negative(
     assert s["per_day_cents"] == -1875
 
 
+def test_safe_to_spend_keeps_a_just_missed_unpaid_bill_at_its_estimate_until_the_payment_posts():
+    plan = {**EMPTY_PLAN, "income": income("biweekly", "2026-11-06"), "buffer": 0,
+            "bills": [bill("Flint Energies", 100, 27, fixed=False, autopay=False),   # due 2 days ago, no payment yet
+                      bill("Old Gym", 30, 20)]}                                   # 9 days ago: past the grace window
+    s = money.safe_to_spend([CHECKING, CARD], plan, [], date(2026, 10, 29))
+
+    assert [(b["name"], b["due"], b["amount_cents"]) for b in s["bills"]] == [("Flint Energies", "2026-10-27", 10000)]
+    assert s["available_cents"] == 140000 - 10000 - 35000
+
+    # the real bill posts for less than the estimate: it drops out, and the actual amount is already in checking
+    posted = [t(8900, "2026-10-29", "RENT_AND_UTILITIES", "Flint Energies")]
+    s = money.safe_to_spend([CHECKING, CARD], plan, posted, date(2026, 10, 29))
+    assert s["bills"] == []
+    assert s["available_cents"] == 140000 - 35000
+
+
+def test_on_payday_the_paycheck_counts_as_coming_until_it_shows_up_in_checking():
+    plan = {**EMPTY_PLAN, "income": income("biweekly", "2026-11-06"), "buffer": 100, "bills": [bill("Phone", 50, 10)]}
+    today = date(2026, 11, 6)  # payday, and the 2,400.00 deposit hasn't synced
+
+    s = money.safe_to_spend([CHECKING, CARD], plan, [], today)
+    # checking 1400 + paycheck 2400 - Phone 50 - card 350 - buffer 100 = 3300 over the 14 days to Nov 20
+    assert s["payday"] == "2026-11-20" and s["days"] == 14
+    assert s["expected_income_cents"] == 240000
+    assert s["available_cents"] == 330000
+    assert s["lines"][1] == {"label": "Payday income (not synced yet)", "amount_cents": 240000}
+
+    # the deposit arrives (a day early or on the day): checking already holds it, so it is not added twice
+    landed = [t(-240000, "2026-11-05", "INCOME", "Employer")]
+    s = money.safe_to_spend([CHECKING, CARD], plan, landed, today)
+    assert s["expected_income_cents"] == 0
+    assert s["available_cents"] == 140000 - 5000 - 35000 - 10000
+    assert "Payday income (not synced yet)" not in [line["label"] for line in s["lines"]]
+
+
+def test_a_deposit_that_is_not_labelled_income_still_counts_as_the_paycheck_if_it_is_paycheck_sized():
+    plan = {**EMPTY_PLAN, "income": income("biweekly", "2026-11-06"), "buffer": 0, "bills": [bill("Phone", 50, 10)]}
+    deposit = [t(-231000, "2026-11-06", "OTHER", "ACH Deposit")]
+    s = money.safe_to_spend([CHECKING, CARD], plan, deposit, date(2026, 11, 6))
+    assert s["expected_income_cents"] == 0
+
+
+def test_the_day_after_payday_nothing_is_expected_even_if_no_deposit_was_seen():
+    plan = {**EMPTY_PLAN, "income": income("biweekly", "2026-11-06"), "buffer": 0, "bills": [bill("Phone", 50, 10)]}
+    s = money.safe_to_spend([CHECKING, CARD], plan, [], date(2026, 11, 7))
+    assert s["expected_income_cents"] == 0 and s["days"] == 13
+
+
 def test_todays_allowance_holds_steady_through_the_day_and_counts_down_what_is_left():
     plan = {**EMPTY_PLAN, "income": income("biweekly", "2026-11-06"), "buffer": 100, "bills": [bill("Phone", 50, 1)]}
     txns = [t(3000, "2026-10-29", merchant="Cafe"),                                  # spent today, on the card
@@ -499,7 +547,8 @@ def test_left_to_invest_adds_idle_brokerage_cash_to_checking_left_after_card_bil
         {"name": "Rent", "amount_cents": 150000, "account_key": "bofa:1111", "paid": True},      # already out
     ]}
     plan = {**EMPTY_PLAN, "buffer": 100, "bills": [bill("Car", 420, 9)]}
-    li = money.left_to_invest([CHECKING, CARD], holdings, plan, upcoming, typical_monthly_cents=200000)
+    li = money.left_to_invest([CHECKING, CARD], holdings, plan, upcoming, typical_monthly_cents=200000,
+                             today=date(2026, 10, 29))
 
     # checking 1400 - card 350 - Car 420 - buffer 100 = 530; + idle 5000 = 5530
     assert li["checking_left_cents"] == 53000
@@ -511,7 +560,7 @@ def test_left_to_invest_adds_idle_brokerage_cash_to_checking_left_after_card_bil
 
 def test_left_to_invest_never_counts_a_checking_shortfall_and_flags_an_empty_plan():
     li = money.left_to_invest([CHECKING, a("9", "credit", "credit card", current=500000)], [], EMPTY_PLAN,
-                              {"bills": []}, typical_monthly_cents=None)
+                              {"bills": []}, typical_monthly_cents=None, today=date(2026, 10, 29))
     assert li["checking_left_cents"] == 0 and li["total_cents"] == 0
     assert li["missing"] == ["bills", "buffer"]
     assert li["options"] == [{"months": 0, "amount_cents": 0, "label": "Invest it all"}]
@@ -665,3 +714,86 @@ def test_manual_holding_without_a_price_yet_has_no_value_and_adds_nothing():
         ("manual:TSP:C", None, None, None)]
     assert [(a["current_cents"], a["updated_at"]) for a in accounts] == [(180200, "2026-10-29"), (0, None)]
     assert money.allocation(holdings[1:])["total_cents"] == 0
+
+
+# --- goals: money set aside in checking, a slice each payday
+
+
+def test_a_goal_sets_aside_an_equal_slice_each_payday_until_its_date_then_frees_it():
+    pay = income("biweekly", "2026-11-06")
+    trip = {"name": "Vacation", "target": 1000, "start": "2026-11-08", "by": "2027-01-15"}
+    # Paydays from Nov 8 up to (not on) Jan 15: Nov 20, Dec 4, Dec 18, Jan 1. $1,000 / 4 = $250 each.
+    g = money.goal_progress(trip, pay, date(2026, 11, 8))
+    assert (g["status"], g["set_aside_cents"], g["per_payday_cents"]) == ("saving", 0, 25000)
+    assert (g["next_payday"], g["paydays_left"]) == ("2026-11-20", 4)
+
+    assert money.goal_progress(trip, pay, date(2026, 12, 5))["set_aside_cents"] == 50000
+    on_last = money.goal_progress(trip, pay, date(2027, 1, 1))
+    assert (on_last["set_aside_cents"], on_last["paydays_left"], on_last["next_payday"]) == (100000, 0, None)
+
+    done = money.goal_progress(trip, pay, date(2027, 1, 15))
+    assert (done["status"], done["set_aside_cents"], done["target_cents"]) == ("ready", 0, 100000)
+
+
+def test_safe_to_spend_keeps_what_goals_have_set_aside_out_of_reach():
+    plan = {**EMPTY_PLAN, "income": income("biweekly", "2026-11-06"), "buffer": 100,
+            "bills": [bill("Phone", 50, 1)],
+            "goals": [{"name": "Trip", "target": 400, "start": "2026-10-01", "by": "2026-12-01"},
+                      {"name": "Someday", "target": 5000}]}  # no date: nothing set aside
+    s = money.safe_to_spend([CHECKING, CARD], plan, [], date(2026, 10, 29))
+
+    # Trip: paydays Oct 9, Oct 23, Nov 6, Nov 20 -> $100 each; Oct 9 and Oct 23 have passed -> $200 set aside.
+    # (1400 - 50 - 350 - 100 - 200) / 8 days = 87.50 a day
+    assert s["available_cents"] == 70000
+    assert s["per_day_cents"] == 8750
+    assert s["lines"][-1] == {"label": "Saving for goals", "amount_cents": -20000}
+
+
+def test_left_to_invest_leaves_goal_savings_in_checking():
+    plan = {**EMPTY_PLAN, "buffer": 100, "bills": [bill("Car", 420, 9)], "income": income("biweekly", "2026-11-06"),
+            "goals": [{"name": "Trip", "target": 400, "start": "2026-10-01", "by": "2026-12-01"}]}
+    li = money.left_to_invest([CHECKING, CARD], [], plan, {"bills": []}, typical_monthly_cents=None,
+                              today=date(2026, 10, 29))
+    # checking 1400 - card 350 - buffer 100 - Trip's $200 set aside so far = 750
+    assert li["checking_left_cents"] == 75000
+    assert {"label": "Saving for goals", "amount_cents": -20000} in li["lines"]
+
+
+def test_a_goal_rebased_midway_spreads_only_what_is_left_over_the_paydays_left():
+    pay = income("biweekly", "2026-11-06")
+    # Raised to $1,500 on Dec 5 with $500 already set aside: Dec 18 and Jan 1 carry $500 each.
+    trip = {"name": "Vacation", "target": 1500, "saved": 500, "start": "2026-12-05", "by": "2027-01-15"}
+    g = money.goal_progress(trip, pay, date(2026, 12, 5))
+    assert (g["set_aside_cents"], g["per_payday_cents"], g["paydays_left"]) == (50000, 50000, 2)
+    assert money.goal_progress(trip, pay, date(2027, 1, 1))["set_aside_cents"] == 150000
+
+
+def test_a_goal_started_on_payday_takes_its_first_slice_next_payday():
+    g = money.goal_progress({"name": "Trip", "target": 400, "start": "2026-11-06", "by": "2026-12-20"},
+                            income("biweekly", "2026-11-06"), date(2026, 11, 6))
+    # Nov 20 and Dec 4 and Dec 18 after Nov 6
+    assert (g["set_aside_cents"], g["next_payday"], g["paydays_left"]) == (0, "2026-11-20", 3)
+
+
+def test_a_freed_goal_shows_as_fully_saved_but_holds_nothing_back():
+    g = money.goal_progress({"name": "Trip", "target": 400, "start": "2026-10-01", "by": "2026-12-01"},
+                            income("biweekly", "2026-11-06"), date(2026, 12, 1))
+    assert (g["status"], g["set_aside_cents"], g["saved_cents"]) == ("ready", 0, 40000)
+
+
+# --- buffer: how many months of planned costs it covers
+
+
+def test_buffer_is_measured_in_months_of_planned_bills_plus_spending_targets():
+    plan = {"bills": [{"name": "Rent", "amount": 1500, "due_day": 1}, {"name": "Phone", "amount": 45.50, "due_day": 9}],
+            "monthly_spend": {"FOOD_AND_DRINK": 400, "TRANSPORTATION": 54.50},
+            "buffer": 6000}
+    b = money.buffer_months(plan)
+    assert b == {"buffer_cents": 600000, "bills_cents": 154550, "targets_cents": 45450,
+                 "monthly_cents": 200000, "months": 3.0}
+
+
+def test_buffer_months_is_unknown_without_any_planned_costs():
+    assert money.buffer_months({"bills": [], "monthly_spend": {}, "buffer": 500})["months"] is None
+    assert money.buffer_months({"bills": [{"name": "Rent", "amount": 900, "due_day": 1}], "buffer": None}) == \
+        {"buffer_cents": 0, "bills_cents": 90000, "targets_cents": 0, "monthly_cents": 90000, "months": 0.0}
