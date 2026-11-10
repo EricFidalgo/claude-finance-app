@@ -927,3 +927,10 @@ def test_coming_up_lists_the_next_reminders_after_today_soonest_first():
     # today's and past ones are under Needs attention instead
     assert [r["title"] for r in money.reminders_ahead(reminders, date(2026, 11, 8))] == \
         ["Move trip money", "Check fund payouts", "Sell DODGX"]
+
+
+def test_detect_recurring_skips_a_restaurant_visited_every_other_week_because_varying_bills_come_monthly():
+    # Dinner out every other payday: three visits about two weeks apart, a different bill each time.
+    dinners = [t(c, d, "FOOD_AND_DRINK", "Pizza Place") for c, d in [(4896, "2026-10-10"), (3623, "2026-10-24"),
+                                                                      (3168, "2026-11-06")]]
+    assert money.detect_recurring(dinners, date(2026, 11, 10)) == []

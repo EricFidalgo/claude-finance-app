@@ -44,7 +44,7 @@ One line each: what was chosen and why.
 
 - **It takes repeat charges to call something recurring; a single charge never counts, whatever its descriptor says.** Bank of America prints RECURRING on any charge to a card on file, so a one-off Apple purchase or a utility paid once carries it.
 - **A fixed series is ≥3 charges of the same merchant within 5% on a weekly, biweekly or monthly cadence; 2 are enough only when they are all the merchant's charges.** Among a restaurant's dozens of charges, two similar amounts a month apart are chance.
-- **A variable series (utilities) needs 3 charges on cadence at any amount.**
+- **A variable series (utilities) needs 3 monthly charges at any amount.** Bills that vary (power, phone) come monthly; three restaurant visits two weeks apart (Mellow Mushroom on paydays) are a habit, and calling them a bill took money out of safe-to-spend.
 - **A series follows a price change**: the next charge within ±5 days of the expected date continues it, so a price rise shows as a flag, not a new subscription.
 - **A plan bill marked `fixed: false` never gets a price-change flag**, only "higher than usual" (>1.5× its median).
 

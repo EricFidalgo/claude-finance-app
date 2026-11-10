@@ -698,7 +698,8 @@ def detect_recurring(txns, today):
     one name (Apple.com/bill) stay separate. It takes repeat charges: the RECURRING a bank prints in a descriptor only
     means the card is on file with the merchant, and one-off Apple purchases carry it too. Two charges make a series
     only when they are all the merchant has: among a restaurant's many charges, two similar amounts a week apart are
-    chance. A variable series needs three.
+    chance. A variable series needs three and must be monthly: bills that vary (power, phone) come once a month, while
+    a varying charge every week or two is a habit, like dinner out every other payday.
     """
     by_merchant = defaultdict(list)
     for x in sorted(txns, key=lambda x: x["date"]):
@@ -731,8 +732,8 @@ def detect_recurring(txns, today):
                     taken.add(x["transaction_id"])
             fixed.append(_series(c, cadence, True))
         found += fixed
-        if not fixed and len(rows) >= 3 and (cadence := _cadence([date.fromisoformat(x["date"]) for x in rows])):
-            found.append(_series(rows, cadence, False))
+        if not fixed and len(rows) >= 3 and _cadence([date.fromisoformat(x["date"]) for x in rows]) == "monthly":
+            found.append(_series(rows, "monthly", False))
     # A series is over once a whole extra cycle passes with no charge.
     grace = {name: hi for name, _, hi in CADENCES}
     active = [s for s in found if date.fromisoformat(s["next_due"]) + timedelta(days=grace[s["cadence"]]) >= today]
