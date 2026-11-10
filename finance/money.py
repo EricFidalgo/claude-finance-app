@@ -5,6 +5,7 @@ Conventions (also in CLAUDE.md):
 - Spending = transactions in spending categories, refunds (negative) netted in. Transfers between own accounts,
   income and credit-card payments are not spending. Pending transactions count.
 """
+import bisect
 import calendar
 import hashlib
 import math
@@ -477,12 +478,8 @@ def slug(name):
 
 def price_on(series, d):
     """The last (ISO date, price) on or before date d in an oldest-first series, else None."""
-    found = None
-    for row in series:
-        if row[0] > _iso(d):
-            break
-        found = row
-    return found
+    i = bisect.bisect_right(series, _iso(d), key=lambda row: row[0])
+    return series[i - 1] if i else None
 
 
 def _price(row):
@@ -646,10 +643,24 @@ def _cadence(days):
     return None
 
 
-def next_after(last, cadence):
+def next_after(last, cadence, day=None):
+    """The charge after one on date last. A monthly bill lands on its billing day (default: last's day of month)."""
     if cadence == "monthly":
-        return _add_months(last, 1, last.day)
+        return _add_months(last, 1, day or last.day)
     return last + timedelta(days=7 if cadence == "weekly" else 14)
+
+
+def _due_day(rows, cadence):
+    """The day of month a monthly series is charged, from its rows oldest first; None for weekly and biweekly.
+
+    A charge on the last day of a short month may be a later day cut short (Feb 28 for the 31st), so the latest charge
+    on any other day decides.
+    """
+    if cadence != "monthly":
+        return None
+    days = [date.fromisoformat(x["date"]) for x in rows]
+    return next((d.day for d in reversed(days) if d.day == 31 or d.day < calendar.monthrange(d.year, d.month)[1]),
+                days[-1].day)
 
 
 def _median(xs):
@@ -662,6 +673,7 @@ def _series(rows, cadence, fixed):
     last = rows[-1]
     names = [merchant_of(x) for x in rows]
     last_date = date.fromisoformat(last["date"])
+    due_day = _due_day(rows, cadence)
     return {
         "merchant": max(set(names), key=lambda n: (names.count(n), n == merchant_of(last))),
         "key": merchant_key(last),
@@ -670,7 +682,8 @@ def _series(rows, cadence, fixed):
         "cadence": cadence,
         "count": len(rows),
         "last_date": last["date"],
-        "next_due": _iso(next_after(last_date, cadence)),
+        "next_due": _iso(next_after(last_date, cadence, due_day)),
+        "due_day": due_day,
         "fixed": fixed,
         "account_key": last.get("account_key"),
         "category": last.get("category"),
@@ -712,8 +725,8 @@ def detect_recurring(txns, today):
         for c, cadence in series:
             # A charge on the next due date at a new price is the same bill after a price change.
             for x in rows:
-                if x["transaction_id"] not in taken and x["date"] > c[-1]["date"] and \
-                        _days_apart(_iso(next_after(date.fromisoformat(c[-1]["date"]), cadence)), x["date"]) <= 5:
+                due = _iso(next_after(date.fromisoformat(c[-1]["date"]), cadence, _due_day(c, cadence)))
+                if x["transaction_id"] not in taken and x["date"] > c[-1]["date"] and _days_apart(due, x["date"]) <= 5:
                     c = [*c, x]
                     taken.add(x["transaction_id"])
             fixed.append(_series(c, cadence, True))
@@ -813,13 +826,13 @@ def upcoming_bills(accounts, plan, recurring, txns, today, days=35):
             continue
         d = date.fromisoformat(s["next_due"])
         while d < today:
-            d = next_after(d, s["cadence"])
+            d = next_after(d, s["cadence"], s.get("due_day"))
         while d < end:
             rows.append({"name": s["merchant"], "due": _iso(d),
                          "amount_cents": s["amount_cents"] if s["fixed"] else s["median_cents"], "source": "detected",
                          "fixed": s["fixed"], "autopay": None, "category": s.get("category"),
                          "account_key": s.get("account_key"), "paid": False})
-            d = next_after(d, s["cadence"])
+            d = next_after(d, s["cadence"], s.get("due_day"))
 
     paydays = []
     if plan.get("income"):
@@ -878,7 +891,7 @@ def month_events(plan, recurring, txns, start, end, today):
             if d >= max(today, start):
                 events.append({"date": _iso(d), "kind": "bill", "name": s["merchant"], "amount_cents": amount,
                                "paid": False})
-            d = next_after(d, s["cadence"])
+            d = next_after(d, s["cadence"], s.get("due_day"))
     return sorted(events, key=lambda e: (e["date"], e["kind"], e["name"]))
 
 

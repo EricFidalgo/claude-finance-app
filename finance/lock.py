@@ -9,7 +9,7 @@ so restarting the app locks it. Setting a new password from the terminal is the 
 removes every passkey and ends every session.
 
 Framework-free on purpose: the same file runs the Money app (finance_tracker/finance/lock.py) and the
-Docker panel (docker-master/lock.py). Keep the two copies identical; tests live with the Money app.
+Docker panel (linux-remote/lock.py). Keep the two copies identical; tests live with the Money app.
 """
 import base64
 import hashlib

@@ -106,11 +106,37 @@ function statusLine(kind, text) {
 const USD = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const USD0 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 const minus = (t) => t.replace('-', '−');
-const money = (c) => (c == null ? '—' : minus(USD.format(c / 100)));
-const money0 = (c) => (c == null ? '—' : minus(USD0.format(Math.round(c / 100))));
+// Hide amounts: for showing the app to someone. Dollar figures become $•••; percentages, counts, dates and
+// chart shapes stay. Plan inputs blur (body.hide-money in app.css). Remembered on this device only.
+let hideMoney = stored('hideMoney', '') === '1';
+const MASKED = '$•••';
+const masked = (c) => (c < 0 ? '−' : '') + MASKED;
+// Alerts, tips and other text written by the server carry their own dollar figures; mask those as they're drawn.
+const DOLLARS = /[−-]?\$\d[\d,]*(\.\d+)?k?/g;
+function maskNode(node) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    if (node.data.includes('$')) node.data = node.data.replace(DOLLARS, MASKED);
+    return;
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return;
+  const walk = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) if (n.data.includes('$')) n.data = n.data.replace(DOLLARS, MASKED);
+  for (const el of [node, ...node.querySelectorAll('[aria-label], [title]')]) {
+    for (const a of ['aria-label', 'title']) {
+      const v = el.getAttribute(a);
+      if (v?.includes('$')) el.setAttribute(a, v.replace(DOLLARS, MASKED));
+    }
+  }
+}
+new MutationObserver((records) => {
+  if (hideMoney) for (const r of records) r.addedNodes.forEach(maskNode);
+}).observe(document.documentElement, { childList: true, subtree: true });
+const money = (c) => (c == null ? '—' : hideMoney ? masked(c) : minus(USD.format(c / 100)));
+const money0 = (c) => (c == null ? '—' : hideMoney ? masked(c) : minus(USD0.format(Math.round(c / 100))));
 const signed = (c) => (c > 0 ? '+' : '') + money(c);
 const compact = (c) => (Math.abs(c) >= 100000 ? money0(c) : money(c));  // cents only below $1,000, to fit a tile
 function short$(dollars) {
+  if (hideMoney) return MASKED;
   if (dollars >= 1000) return '$' + (dollars / 1000).toFixed(dollars % 1000 ? 1 : 0).replace(/\.0$/, '') + 'k';
   return '$' + Math.round(dollars);
 }
@@ -153,7 +179,8 @@ async function api(path, opts = {}) {
   const isJson = (r.headers.get('content-type') || '').includes('json');
   const body = isJson ? await r.json() : await r.text();
   if (!r.ok) {
-    const msg = (isJson && (body.error || (body.errors || []).join('; '))) || `HTTP ${r.status}`;
+    const msg = (isJson && (body.error || (body.errors || []).join('; ')
+      || (body.locked && 'the app was locked. Try again.'))) || `HTTP ${r.status}`;
     throw Object.assign(new Error(msg), { body, status: r.status });
   }
   return body;
@@ -1026,8 +1053,8 @@ async function addBill(r, btn) {
   btn.disabled = true;
   try {
     const plan = await api('/api/plan');
-    plan.bills.push({ name: r.merchant, amount: r.amount_cents / 100, due_day: parseDay(r.next_due).getDate(),
-      category: r.category, fixed: r.fixed });
+    plan.bills.push({ name: r.merchant, amount: r.amount_cents / 100,
+      due_day: r.due_day || parseDay(r.next_due).getDate(), category: r.category, fixed: r.fixed });
     await api('/api/plan', { method: 'PUT', body: JSON.stringify(plan) });
     toast(`Added ${r.merchant} to your plan.`);
     render();
@@ -1220,7 +1247,7 @@ async function screenInvesting() {
     const pct = gain != null && x.cost_basis_cents ? ` (${((100 * gain) / x.cost_basis_cents).toFixed(1)}%)` : '';
     // a manual holding is worth its last close, so say which day that was
     const priced = x.account_key.startsWith('manual:') && (x.updated_at ? `price of ${fmtShort(x.updated_at)}` : 'no price yet');
-    const what = [x.ticker && x.name, x.quantity && `${+x.quantity.toFixed(4)} sh`].filter(Boolean).join(' · ');
+    const what = [x.ticker && x.name, x.quantity && !hideMoney && `${+x.quantity.toFixed(4)} sh`].filter(Boolean).join(' · ');
     return row(x.ticker || x.name, [what, priced],
       money0(x.value_cents), gain != null ? `${signed(gain).replace(/\.\d\d$/, '')}${pct}` : null);
   })));
@@ -1244,8 +1271,9 @@ function historyCard(hist) {
       class: 'chip', type: 'button', 'aria-pressed': String(m === months),
       onclick: () => { months = m; store('range', m); draw(); },
     }, text)));
-    const from = todayDate();
-    from.setMonth(from.getMonth() - months);
+    const t = todayDate();  // `months` back, the day cut to that month's length (Mar 31 → Feb 28, not Mar 3)
+    const from = new Date(t.getFullYear(), t.getMonth() - months, 1);
+    from.setDate(Math.min(t.getDate(), new Date(from.getFullYear(), from.getMonth() + 1, 0).getDate()));
     const pts = hist.points.filter((p) => p.date >= isoOf(from));
     const inRange = pts.length >= 2;
     const shown = inRange ? pts : hist.points.slice(-2);
@@ -1666,6 +1694,21 @@ async function askClaude() {
     toast('Could not copy: ' + e.message);
   }
 }
+
+const hideBtn = document.getElementById('hide-money');
+function showHideState() {
+  document.body.classList.toggle('hide-money', hideMoney);
+  hideBtn.setAttribute('aria-pressed', String(hideMoney));
+  hideBtn.setAttribute('aria-label', hideMoney ? 'Show amounts' : 'Hide amounts');
+}
+hideBtn.addEventListener('click', () => {
+  hideMoney = !hideMoney;
+  store('hideMoney', hideMoney ? '1' : '0');
+  showHideState();
+  toast(hideMoney ? 'Amounts hidden. Tap the eye again to show them.' : 'Amounts showing.');
+  render();
+});
+showHideState();
 
 syncBtn.addEventListener('click', syncNow);
 document.getElementById('ask').addEventListener('click', askClaude);

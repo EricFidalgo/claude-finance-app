@@ -248,9 +248,10 @@ def _last_attempt():
 async def sync_now(request: Request):
     """Manual sync. Ignored within a few minutes of the last attempt unless {"force": true}."""
     try:
-        force = bool((await request.json()).get("force"))
+        body = await request.json()
     except ValueError:
-        force = False
+        body = None
+    force = isinstance(body, dict) and bool(body.get("force"))
     app = request.app
     if app.state.sync_lock.locked():
         return JSONResponse({"status": "running"})

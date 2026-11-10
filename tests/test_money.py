@@ -361,6 +361,15 @@ def test_tips_flag_a_budget_on_pace_to_overrun_a_card_over_30_percent_thin_cash_
     ]
 
 
+def test_the_price_on_a_day_is_the_last_close_on_or_before_it():
+    series = [("2026-10-01", 200.0), ("2026-10-02", 210.0), ("2026-10-05", 220.0)]
+    assert money.price_on(series, date(2026, 9, 30)) is None                      # before the first price
+    assert money.price_on(series, date(2026, 10, 2)) == ("2026-10-02", 210.0)     # a trading day
+    assert money.price_on(series, date(2026, 10, 4)) == ("2026-10-02", 210.0)     # the weekend keeps Friday's
+    assert money.price_on(series, date(2026, 11, 1)) == ("2026-10-05", 220.0)     # after the last price
+    assert money.price_on([], date(2026, 10, 2)) is None
+
+
 def test_portfolio_history_values_todays_shares_at_past_prices_and_holds_cash_and_unpriced_funds_flat():
     holdings = [{**h("VTI", "etf", 220000), "security_id": "s-vti", "quantity": 10},
                 {**h("BND", "etf", 7200), "security_id": "s-bnd", "quantity": 1},
@@ -470,6 +479,30 @@ def test_detect_recurring_needs_repeat_charges_because_the_banks_recurring_label
     repeats = monthly([1599, 1599], "Streamly", start=(2026, 9, 12))
     [s] = money.detect_recurring(repeats, date(2026, 11, 1))
     assert (s["merchant"], s["count"], s["next_due"]) == ("Streamly", 2, "2026-11-12")
+
+
+def test_a_bill_on_the_31st_is_still_due_on_the_31st_after_february():
+    txns = [t(1599, d, "ENTERTAINMENT", "Streamly") for d in ("2026-12-31", "2027-01-31", "2027-02-28")]
+    [s] = money.detect_recurring(txns, date(2027, 3, 5))
+    assert (s["last_date"], s["next_due"]) == ("2027-02-28", "2027-03-31")
+
+
+def test_a_price_rise_posted_a_few_days_after_the_31st_stays_the_same_bill():
+    txns = [t(1599, d, "ENTERTAINMENT", "Streamly") for d in ("2026-12-31", "2027-01-31", "2027-02-28")] \
+        + [t(1999, "2027-04-03", "ENTERTAINMENT", "Streamly")]   # due Mar 31, posted 3 days late at the new price
+    [s] = money.detect_recurring(txns, date(2027, 4, 5))
+    assert (s["amount_cents"], s["count"], s["last_date"]) == (1999, 4, "2027-04-03")
+
+
+def test_the_schedule_and_calendar_keep_a_bill_on_the_31st_after_a_30_day_month():
+    txns = [t(1599, d, "ENTERTAINMENT", "Streamly") for d in ("2026-12-31", "2027-01-31", "2027-02-28")]
+    today = date(2027, 3, 5)
+    recurring = money.detect_recurring(txns, today)
+
+    cal = money.upcoming_bills([CHECKING], EMPTY_PLAN, recurring, txns, today, days=90)
+    assert [b["due"] for b in cal["bills"]] == ["2027-03-31", "2027-04-30", "2027-05-31"]
+    events = money.month_events(EMPTY_PLAN, recurring, txns, date(2027, 5, 1), date(2027, 6, 1), today)
+    assert [e["date"] for e in events if e["name"] == "Streamly"] == ["2027-05-31"]
 
 
 def test_detect_recurring_drops_a_series_that_stopped_charging():

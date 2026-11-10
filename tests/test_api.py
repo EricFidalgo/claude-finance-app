@@ -303,6 +303,12 @@ def test_manual_sync_is_debounced_unless_forced(app):
     assert app.post("/api/sync", json={"force": True}).json()["status"] == "synced"
 
 
+def test_a_sync_request_without_a_json_object_counts_as_not_forced(app):
+    for body in ([], 5, "force", None):
+        r = app.post("/api/sync", json=body)
+        assert (r.status_code, r.json()["status"]) == (200, "skipped")
+
+
 def test_snapshot_is_compact_text_with_this_screens_data_and_a_question_line(app):
     r = app.get("/api/snapshot?screen=spending")
     assert r.headers["content-type"].startswith("text/plain")
